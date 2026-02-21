@@ -28,8 +28,24 @@ module RegFile (
   localparam int NumRegs = 32;
   logic [`REG_SIZE] regs[NumRegs];
 
-  // TODO: your code here
+  always_comb begin
+    rs1_data = (rs1 == 5'd0) ? 32'd0 : regs[rs1];
+    rs2_data = (rs2 == 5'd0) ? 32'd0 : regs[rs2];
+  end
 
+  integer i;
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      for (i = 0; i < NumRegs; i = i + 1) begin
+        regs[i] <= 32'd0;
+      end
+    end else begin
+      if (we && (rd != 5'd0)) begin
+        regs[rd] <= rd_data;
+      end
+      regs[0] <= 32'd0;
+    end
+  end
 endmodule
 
 module DatapathSingleCycle (
@@ -71,7 +87,8 @@ module DatapathSingleCycle (
 
   // S - stores
   wire [11:0] imm_s;
-  assign imm_s[11:5] = insn_funct7, imm_s[4:0] = insn_rd;
+  assign imm_s[11:5] = insn_funct7;
+  assign imm_s[4:0] = insn_rd;
 
   // B - conditionals
   wire [12:0] imm_b;
@@ -198,32 +215,487 @@ module DatapathSingleCycle (
   end
 
   // NOTE: don't rename your RegFile instance as the tests expect it to be `rf`
-  // TODO: you will need to edit the port connections, however.
+  logic rf_we;
+  logic [4:0] rf_rd;
+  logic [`REG_SIZE] rf_wdata;
+
   wire [`REG_SIZE] rs1_data;
   wire [`REG_SIZE] rs2_data;
   RegFile rf (
     .clk(clk),
     .rst(rst),
-    .we(1'b0),
-    .rd(0),
-    .rd_data(0),
-    .rs1(0),
-    .rs2(0),
+    .we(rf_we),
+    .rd(rf_rd),
+    .rd_data(rf_wdata),
+    .rs1(insn_rs1),
+    .rs2(insn_rs2),
     .rs1_data(rs1_data),
-    .rs2_data(rs2_data));
+    .rs2_data(rs2_data)
+  );
 
   logic illegal_insn;
+
+  // helpers
+  wire [`REG_SIZE] lui_imm = {insn_from_imem[31:12], 12'b0};
+  wire [4:0] shamt_reg = rs2_data[4:0];
+  wire signed [`REG_SIZE] s_rs1 = $signed(rs1_data);
+  wire signed [`REG_SIZE] s_rs2 = $signed(rs2_data);
+  wire signed [`REG_SIZE] s_imm_i = $signed(imm_i_sext);
+
+  // CLA inputs
+  logic [31:0] alu_a, alu_b;
+  logic        alu_cin;
+  wire  [31:0] alu_sum;
+
+  // Divider inputs (always unsigned core)
+  logic [31:0] div_a, div_b;
+  wire  [31:0] div_q, div_r;
+
+  CarryLookaheadAdder u_cla (
+    .a   (alu_a),
+    .b   (alu_b),
+    .cin (alu_cin),
+    .sum (alu_sum)
+  );
+
+  DividerUnsigned u_divu (
+    .i_dividend (div_a),
+    .i_divisor  (div_b),
+    .o_quotient (div_q),
+    .o_remainder(div_r)
+  );
+
+  // address helpers for word-aligned
+  logic [`REG_SIZE] eff_addr;
+  logic [`REG_SIZE] aligned_addr;
+  logic [1:0] addr_off;
+
+  // load selection helpers
+  logic [7:0]  load_byte;
+  logic [15:0] load_half;
+  logic [31:0] shifted;
+
+  always_comb begin
+    // defaults
+    alu_a   = rs1_data;
+    alu_b   = rs2_data;
+    alu_cin = 1'b0;
+
+    div_a = rs1_data;
+    div_b = rs2_data;
+
+    // ADDI
+    if (insn_addi) begin
+      alu_b = imm_i_sext;
+    end
+
+    // SUB
+    if (insn_sub) begin
+      alu_b   = ~rs2_data;
+      alu_cin = 1'b1;
+    end
+
+    // signed div/rem: feed absolute values
+    if (insn_div || insn_rem) begin
+      div_a = rs1_data[31] ? (~rs1_data + 1) : rs1_data;
+      div_b = rs2_data[31] ? (~rs2_data + 1) : rs2_data;
+    end
+
+    // unsigned div/rem
+    if (insn_divu || insn_remu) begin
+      div_a = rs1_data;
+      div_b = rs2_data;
+    end
+  end
 
   always_comb begin
     illegal_insn = 1'b0;
 
+    trace_completed_pc = pcCurrent;
+    trace_completed_insn = insn_from_imem;
+    trace_completed_cycle_status = CYCLE_NO_STALL;
+
+    // defaults
+    addr_to_dmem = 32'd0;
+    store_data_to_dmem = 32'd0;
+    store_we_to_dmem = 4'b0000;
+    pcNext = pcCurrent + 32'd4;
+    rf_we = 1'b0;
+    rf_rd = insn_rd;
+    rf_wdata = 32'd0;
+    halt = 1'b0;
+    eff_addr = 32'd0;
+    aligned_addr = 32'd0;
+    addr_off = 2'b00;
+    load_byte = 8'd0;
+    load_half = 16'd0;
+
     case (insn_opcode)
-      OpLui: begin
-        // TODO: start here by implementing lui
+      OpMiscMem: begin
+        if (!insn_fence) illegal_insn = 1'b1;
       end
+
+      OpEnviron: begin
+        if (insn_ecall) begin
+          halt = 1'b1;
+        end else begin
+          illegal_insn = 1'b1;
+        end
+      end
+
+      // ----- U-TYPE -----
+
+      OpLui: begin
+        rf_we = 1'b1;
+        rf_wdata = lui_imm;
+      end
+
+       OpAuipc: begin
+        rf_we = 1'b1;
+        rf_wdata = pcCurrent + lui_imm;
+      end
+
+      // ----- JUMPS -----
+
+      OpJal: begin
+        rf_we    = 1'b1;
+        rf_wdata = pcCurrent + 32'd4;
+        pcNext   = pcCurrent + imm_j_sext;
+      end
+
+      OpJalr: begin
+        rf_we    = 1'b1;
+        rf_wdata = pcCurrent + 32'd4;
+        // target = (rs1 + imm_i) & ~1
+        pcNext   = (rs1_data + imm_i_sext) & 32'hFFFF_FFFE;
+      end
+
+      // ----- I-TYPE -----
+
+      OpRegImm: begin
+        case (insn_funct3)
+          3'b000: begin // addi
+            rf_we    = 1'b1;
+            rf_wdata = alu_sum;
+          end
+          3'b010: begin // slti
+            rf_we    = 1'b1;
+            rf_wdata = (s_rs1 < s_imm_i) ? 32'd1 : 32'd0;
+          end
+          3'b011: begin // sltiu
+            rf_we    = 1'b1;
+            rf_wdata = (rs1_data < imm_i_sext) ? 32'd1 : 32'd0;
+          end
+          3'b100: begin // xori
+            rf_we    = 1'b1;
+            rf_wdata = rs1_data ^ imm_i_sext;
+          end
+          3'b110: begin // ori
+            rf_we    = 1'b1;
+            rf_wdata = rs1_data | imm_i_sext;
+          end
+          3'b111: begin // andi
+            rf_we    = 1'b1;
+            rf_wdata = rs1_data & imm_i_sext;
+          end
+          3'b001: begin // slli
+            if (insn_from_imem[31:25] == 7'd0) begin
+              rf_we    = 1'b1;
+              rf_wdata = rs1_data << imm_shamt;
+            end else begin
+              illegal_insn = 1'b1;
+            end
+          end
+          3'b101: begin // srli/srai
+            if (insn_from_imem[31:25] == 7'd0) begin
+              rf_we    = 1'b1;
+              rf_wdata = rs1_data >> imm_shamt; // srli
+            end else if (insn_from_imem[31:25] == 7'b0100000) begin
+              rf_we    = 1'b1;
+              rf_wdata = $signed(rs1_data) >>> imm_shamt; // srai
+            end else begin
+              illegal_insn = 1'b1;
+            end
+          end
+          default: illegal_insn = 1'b1;
+        endcase
+      end
+
+      // ----- R-TYPE -----
+
+      OpRegReg: begin
+        if (insn_funct7 == 7'd0) begin
+          case (insn_funct3)
+            3'b000: begin // add
+              rf_we    = 1'b1;
+              rf_wdata = alu_sum;
+            end
+            3'b001: begin // sll
+              rf_we    = 1'b1;
+              rf_wdata = rs1_data << shamt_reg;
+            end
+            3'b010: begin // slt
+              rf_we    = 1'b1;
+              rf_wdata = (s_rs1 < s_rs2) ? 32'd1 : 32'd0;
+            end
+            3'b011: begin // sltu
+              rf_we    = 1'b1;
+              rf_wdata = (rs1_data < rs2_data) ? 32'd1 : 32'd0;
+            end
+            3'b100: begin // xor
+              rf_we    = 1'b1;
+              rf_wdata = rs1_data ^ rs2_data;
+            end
+            3'b101: begin // srl
+              rf_we    = 1'b1;
+              rf_wdata = rs1_data >> shamt_reg;
+            end
+            3'b110: begin // or
+              rf_we    = 1'b1;
+              rf_wdata = rs1_data | rs2_data;
+            end
+            3'b111: begin // and
+              rf_we    = 1'b1;
+              rf_wdata = rs1_data & rs2_data;
+            end
+            default: illegal_insn = 1'b1;
+          endcase
+        end else if (insn_funct7 == 7'b0100000) begin
+          case (insn_funct3)
+            3'b000: begin // sub
+              rf_we    = 1'b1;
+              rf_wdata = alu_sum;
+            end
+            3'b101: begin // sra
+              rf_we    = 1'b1;
+              rf_wdata = $signed(rs1_data) >>> shamt_reg;
+            end
+            default: illegal_insn = 1'b1;
+          endcase
+        end else if (insn_funct7 == 7'd1) begin
+          logic [63:0] prod;
+          logic signed [63:0] s_prod;
+          logic signed [31:0] s_a32;
+          logic signed [31:0] s_b32;
+          logic [63:0] u_prod;
+
+          // defaults
+          prod   = 64'd0;
+          s_prod = 64'd0;
+          u_prod = 64'd0;
+          s_a32  = $signed(rs1_data);
+          s_b32  = $signed(rs2_data);
+
+          rf_we = 1'b1;
+
+          unique case (insn_funct3)
+            3'b000: begin // mul
+              u_prod   = $unsigned(rs1_data) * $unsigned(rs2_data);
+              rf_wdata = u_prod[31:0];
+            end
+            3'b001: begin // mulh
+              s_prod   = $signed(s_a32) * $signed(s_b32);
+              rf_wdata = s_prod[63:32];
+            end
+            3'b010: begin // mulhsu
+              s_prod   = $signed(s_a32) * $signed({1'b0, rs2_data});
+              rf_wdata = s_prod[63:32];
+            end
+            3'b011: begin // mulhu
+              u_prod   = $unsigned(rs1_data) * $unsigned(rs2_data);
+              rf_wdata = u_prod[63:32];
+            end
+
+            3'b100, // div
+            3'b101, // divu
+            3'b110, // rem
+            3'b111: begin // remu
+              // division / remainder via DividerUnsigned (no / %)
+              logic div_by_zero;
+              logic signed_overflow;
+              logic a_neg, b_neg;
+              logic [`REG_SIZE] a_abs, b_abs;
+              logic [`REG_SIZE] q_u, r_u;
+              logic [`REG_SIZE] q_s, r_s;
+
+              div_by_zero     = (rs2_data == 32'd0);
+              signed_overflow = (rs1_data == 32'h8000_0000) && (rs2_data == 32'hFFFF_FFFF);
+
+              a_neg = rs1_data[31];
+              b_neg = rs2_data[31];
+
+              // abs via two's complement (no '-')
+              a_abs = a_neg ? (~rs1_data + 32'd1) : rs1_data;
+              b_abs = b_neg ? (~rs2_data + 32'd1) : rs2_data;
+
+              q_u = div_q;
+              r_u = div_r;
+
+              // sign adjust
+              q_s = (a_neg ^ b_neg) ? (~q_u + 32'd1) : q_u;
+              r_s = a_neg ? (~r_u + 32'd1) : r_u;
+
+              unique case (insn_funct3)
+                3'b100: begin // div
+                  if (div_by_zero) begin
+                    rf_wdata = 32'hFFFF_FFFF;
+                  end else if (signed_overflow) begin
+                    rf_wdata = 32'h8000_0000;
+                  end else begin
+                    rf_wdata = q_s;
+                  end
+                end
+                3'b101: begin // divu
+                  if (div_by_zero) begin
+                    rf_wdata = 32'hFFFF_FFFF;
+                  end else begin
+                    rf_wdata = div_q;
+                  end
+                end
+                3'b110: begin // rem
+                  if (div_by_zero) begin
+                    rf_wdata = rs1_data;
+                  end else if (signed_overflow) begin
+                    rf_wdata = 32'd0;
+                  end else begin
+                    rf_wdata = r_s;
+                  end
+                end
+                3'b111: begin // remu
+                  if (div_by_zero) begin
+                    rf_wdata = rs1_data;
+                  end else begin
+                    rf_wdata = div_r;
+                  end
+                end
+                default: begin
+                  illegal_insn = 1'b1;
+                  rf_we = 1'b0;
+                end
+              endcase
+            end
+
+            default: begin
+              illegal_insn = 1'b1;
+              rf_we = 1'b0;
+            end
+          endcase
+        end else begin
+          illegal_insn = 1'b1;
+        end
+      end
+
+      // ----- BRANCH -----
+
+      OpBranch: begin
+        logic take_branch;
+        take_branch = 1'b0;
+        unique case (insn_funct3)
+          3'b000: take_branch = (rs1_data == rs2_data); // beq
+          3'b001: take_branch = (rs1_data != rs2_data); // bne
+          3'b100: take_branch = (s_rs1 <  s_rs2); // blt
+          3'b101: take_branch = (s_rs1 >= s_rs2); // bge
+          3'b110: take_branch = (rs1_data <  rs2_data); // bltu
+          3'b111: take_branch = (rs1_data >= rs2_data); // bgeu
+          default: illegal_insn = 1'b1;
+        endcase
+
+        if (!illegal_insn && take_branch) begin
+          pcNext = pcCurrent + imm_b_sext;
+        end
+      end
+
+      // ----- LOAD -----
+      OpLoad: begin
+        eff_addr     = rs1_data + imm_i_sext;
+        aligned_addr = {eff_addr[31:2], 2'b00};
+        addr_off     = eff_addr[1:0];
+
+        addr_to_dmem = aligned_addr;
+
+        shifted   = load_data_from_dmem >> (8 * addr_off);
+        load_byte = shifted[7:0];
+
+        shifted   = load_data_from_dmem >> (16 * addr_off[1]);
+        load_half = shifted[15:0];
+
+        rf_we = 1'b1;
+
+        unique case (insn_funct3)
+          3'b000: begin // lb
+            rf_wdata = {{24{load_byte[7]}}, load_byte};
+          end
+          3'b001: begin // lh
+            if (addr_off[0] != 1'b0) begin
+              illegal_insn = 1'b1;
+              rf_we = 1'b0;
+            end else begin
+              rf_wdata = {{16{load_half[15]}}, load_half};
+            end
+          end
+          3'b010: begin // lw
+            if (addr_off != 2'b00) begin
+              illegal_insn = 1'b1;
+              rf_we = 1'b0;
+            end else begin
+              rf_wdata = load_data_from_dmem;
+            end
+          end
+          3'b100: begin // lbu
+            rf_wdata = {24'd0, load_byte};
+          end
+          3'b101: begin // lhu
+            if (addr_off[0] != 1'b0) begin
+              illegal_insn = 1'b1;
+              rf_we = 1'b0;
+            end else begin
+              rf_wdata = {16'd0, load_half};
+            end
+          end
+          default: begin
+            illegal_insn = 1'b1;
+            rf_we = 1'b0;
+          end
+        endcase
+      end
+
+      // ----- STORE -----
+      OpStore: begin
+        eff_addr     = rs1_data + imm_s_sext;
+        aligned_addr = {eff_addr[31:2], 2'b00};
+        addr_off     = eff_addr[1:0];
+
+        addr_to_dmem = aligned_addr;
+
+        unique case (insn_funct3)
+          3'b000: begin // sb
+            store_we_to_dmem   = 4'b0001 << addr_off;
+            store_data_to_dmem = {4{rs2_data[7:0]}};
+          end
+          3'b001: begin // sh
+            if (addr_off[0] != 1'b0) begin
+              illegal_insn = 1'b1;
+            end else begin
+              store_we_to_dmem   = 4'b0011 << addr_off;
+              store_data_to_dmem = {2{rs2_data[15:0]}};
+            end
+          end
+          3'b010: begin // sw
+            if (addr_off != 2'b00) begin
+              illegal_insn = 1'b1;
+            end else begin
+              store_we_to_dmem   = 4'b1111;
+              store_data_to_dmem = rs2_data;
+            end
+          end
+          default: illegal_insn = 1'b1;
+        endcase
+      end
+
       default: begin
         illegal_insn = 1'b1;
       end
+
     endcase
   end
 
