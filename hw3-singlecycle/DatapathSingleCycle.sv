@@ -510,7 +510,6 @@ module DatapathSingleCycle (
             3'b101, // divu
             3'b110, // rem
             3'b111: begin // remu
-              // division / remainder via DividerUnsigned (no / %)
               logic div_by_zero;
               logic signed_overflow;
               logic a_neg, b_neg;
@@ -524,14 +523,12 @@ module DatapathSingleCycle (
               a_neg = rs1_data[31];
               b_neg = rs2_data[31];
 
-              // abs via two's complement (no '-')
               a_abs = a_neg ? (~rs1_data + 32'd1) : rs1_data;
               b_abs = b_neg ? (~rs2_data + 32'd1) : rs2_data;
 
               q_u = div_q;
               r_u = div_r;
 
-              // sign adjust
               q_s = (a_neg ^ b_neg) ? (~q_u + 32'd1) : q_u;
               r_s = a_neg ? (~r_u + 32'd1) : r_u;
 

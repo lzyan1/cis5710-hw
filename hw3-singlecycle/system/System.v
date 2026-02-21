@@ -47,6 +47,70 @@ module MyClockGen (
 		.LOCK(locked)
 	);
 endmodule
+module DividerUnsigned (
+	i_dividend,
+	i_divisor,
+	o_remainder,
+	o_quotient
+);
+	input wire [31:0] i_dividend;
+	input wire [31:0] i_divisor;
+	output wire [31:0] o_remainder;
+	output wire [31:0] o_quotient;
+	wire [31:0] dvd [0:32];
+	wire [31:0] rem [0:32];
+	wire [31:0] quo [0:32];
+	assign dvd[0] = i_dividend;
+	assign rem[0] = 32'b00000000000000000000000000000000;
+	assign quo[0] = 32'b00000000000000000000000000000000;
+	genvar _gv_i_1;
+	generate
+		for (_gv_i_1 = 0; _gv_i_1 < 32; _gv_i_1 = _gv_i_1 + 1) begin : genblk1
+			localparam i = _gv_i_1;
+			DividerOneIter f(
+				.i_dividend(dvd[i]),
+				.i_divisor(i_divisor),
+				.i_remainder(rem[i]),
+				.i_quotient(quo[i]),
+				.o_dividend(dvd[i + 1]),
+				.o_remainder(rem[i + 1]),
+				.o_quotient(quo[i + 1])
+			);
+		end
+	endgenerate
+	assign o_remainder = rem[32];
+	assign o_quotient = quo[32];
+endmodule
+module DividerOneIter (
+	i_dividend,
+	i_divisor,
+	i_remainder,
+	i_quotient,
+	o_dividend,
+	o_remainder,
+	o_quotient
+);
+	input wire [31:0] i_dividend;
+	input wire [31:0] i_divisor;
+	input wire [31:0] i_remainder;
+	input wire [31:0] i_quotient;
+	output wire [31:0] o_dividend;
+	output wire [31:0] o_remainder;
+	output wire [31:0] o_quotient;
+	wire [31:0] r_shift;
+	wire lt;
+	wire [31:0] q0;
+	wire [31:0] q1;
+	wire [31:0] r_sub;
+	assign r_shift = {i_remainder[30:0], i_dividend[31]};
+	assign lt = r_shift < i_divisor;
+	assign q0 = {i_quotient[30:0], 1'b0};
+	assign q1 = {i_quotient[30:0], 1'b1};
+	assign r_sub = r_shift - i_divisor;
+	assign o_quotient = (lt ? q0 : q1);
+	assign o_remainder = (lt ? r_shift : r_sub);
+	assign o_dividend = {i_dividend[30:0], 1'b0};
+endmodule
 module gp1 (
 	a,
 	b,
@@ -379,16 +443,55 @@ module DatapathSingleCycle (
 	wire signed [31:0] s_rs1 = $signed(rs1_data);
 	wire signed [31:0] s_rs2 = $signed(rs2_data);
 	wire signed [31:0] s_imm_i = $signed(imm_i_sext);
-	reg [31:0] cla_a;
-	reg [31:0] cla_b;
-	reg cla_cin;
-	wire [31:0] cla_sum;
+	reg [31:0] alu_a;
+	reg [31:0] alu_b;
+	reg alu_cin;
+	wire [31:0] alu_sum;
+	reg [31:0] div_a;
+	reg [31:0] div_b;
+	wire [31:0] div_q;
+	wire [31:0] div_r;
 	CarryLookaheadAdder u_cla(
-		.a(cla_a),
-		.b(cla_b),
-		.cin(cla_cin),
-		.sum(cla_sum)
+		.a(alu_a),
+		.b(alu_b),
+		.cin(alu_cin),
+		.sum(alu_sum)
 	);
+	DividerUnsigned u_divu(
+		.i_dividend(div_a),
+		.i_divisor(div_b),
+		.o_quotient(div_q),
+		.o_remainder(div_r)
+	);
+	reg [31:0] eff_addr;
+	reg [31:0] aligned_addr;
+	reg [1:0] addr_off;
+	reg [7:0] load_byte;
+	reg [15:0] load_half;
+	reg [31:0] shifted;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		alu_a = rs1_data;
+		alu_b = rs2_data;
+		alu_cin = 1'b0;
+		div_a = rs1_data;
+		div_b = rs2_data;
+		if (insn_addi)
+			alu_b = imm_i_sext;
+		if (insn_sub) begin
+			alu_b = ~rs2_data;
+			alu_cin = 1'b1;
+		end
+		if (insn_div || insn_rem) begin
+			div_a = (rs1_data[31] ? ~rs1_data + 1 : rs1_data);
+			div_b = (rs2_data[31] ? ~rs2_data + 1 : rs2_data);
+		end
+		if (insn_divu || insn_remu) begin
+			div_a = rs1_data;
+			div_b = rs2_data;
+		end
+	end
 	always @(*) begin
 		if (_sv2v_0)
 			;
@@ -404,12 +507,15 @@ module DatapathSingleCycle (
 		rf_rd = insn_rd;
 		rf_wdata = 32'd0;
 		halt = 1'b0;
-		cla_a = 32'd0;
-		cla_b = 32'd0;
-		cla_cin = 1'b0;
+		eff_addr = 32'd0;
+		aligned_addr = 32'd0;
+		addr_off = 2'b00;
+		load_byte = 8'd0;
+		load_half = 16'd0;
 		case (insn_opcode)
 			OpMiscMem:
-				;
+				if (!insn_fence)
+					illegal_insn = 1'b1;
 			OpEnviron:
 				if (insn_ecall)
 					halt = 1'b1;
@@ -419,14 +525,25 @@ module DatapathSingleCycle (
 				rf_we = 1'b1;
 				rf_wdata = lui_imm;
 			end
+			OpAuipc: begin
+				rf_we = 1'b1;
+				rf_wdata = pcCurrent + lui_imm;
+			end
+			OpJal: begin
+				rf_we = 1'b1;
+				rf_wdata = pcCurrent + 32'd4;
+				pcNext = pcCurrent + imm_j_sext;
+			end
+			OpJalr: begin
+				rf_we = 1'b1;
+				rf_wdata = pcCurrent + 32'd4;
+				pcNext = (rs1_data + imm_i_sext) & 32'hfffffffe;
+			end
 			OpRegImm:
 				case (insn_funct3)
 					3'b000: begin
 						rf_we = 1'b1;
-						cla_a = rs1_data;
-						cla_b = imm_i_sext;
-						cla_cin = 1'b0;
-						rf_wdata = cla_sum;
+						rf_wdata = alu_sum;
 					end
 					3'b010: begin
 						rf_we = 1'b1;
@@ -469,18 +586,12 @@ module DatapathSingleCycle (
 					default: illegal_insn = 1'b1;
 				endcase
 			OpRegReg:
-				if (insn_from_imem[31:25] == 7'd0)
+				if (insn_funct7 == 7'd0)
 					case (insn_funct3)
-						3'b000:
-							if (insn_funct7 == 7'd0) begin
-								rf_we = 1'b1;
-								cla_a = rs1_data;
-								cla_b = rs2_data;
-								cla_cin = 1'b0;
-								rf_wdata = cla_sum;
-							end
-							else
-								illegal_insn = 1'b1;
+						3'b000: begin
+							rf_we = 1'b1;
+							rf_wdata = alu_sum;
+						end
 						3'b001: begin
 							rf_we = 1'b1;
 							rf_wdata = rs1_data << shamt_reg;
@@ -511,27 +622,110 @@ module DatapathSingleCycle (
 						end
 						default: illegal_insn = 1'b1;
 					endcase
-				else if (insn_from_imem[31:25] == 7'b0100000)
+				else if (insn_funct7 == 7'b0100000)
 					case (insn_funct3)
-						3'b000:
-							if (insn_funct7 == 7'b0100000) begin
-								rf_we = 1'b1;
-								cla_a = rs1_data;
-								cla_b = ~rs2_data;
-								cla_cin = 1'b1;
-								rf_wdata = cla_sum;
-							end
-							else
-								illegal_insn = 1'b1;
+						3'b000: begin
+							rf_we = 1'b1;
+							rf_wdata = alu_sum;
+						end
 						3'b101: begin
 							rf_we = 1'b1;
 							rf_wdata = $signed(rs1_data) >>> shamt_reg;
 						end
 						default: illegal_insn = 1'b1;
 					endcase
+				else if (insn_funct7 == 7'd1) begin : sv2v_autoblock_1
+					reg [63:0] prod;
+					reg signed [63:0] s_prod;
+					reg signed [31:0] s_a32;
+					reg signed [31:0] s_b32;
+					reg [63:0] u_prod;
+					prod = 64'd0;
+					s_prod = 64'd0;
+					u_prod = 64'd0;
+					s_a32 = $signed(rs1_data);
+					s_b32 = $signed(rs2_data);
+					rf_we = 1'b1;
+					(* full_case, parallel_case *)
+					case (insn_funct3)
+						3'b000: begin
+							u_prod = $unsigned(rs1_data) * $unsigned(rs2_data);
+							rf_wdata = u_prod[31:0];
+						end
+						3'b001: begin
+							s_prod = $signed(s_a32) * $signed(s_b32);
+							rf_wdata = s_prod[63:32];
+						end
+						3'b010: begin
+							s_prod = $signed(s_a32) * $signed({1'b0, rs2_data});
+							rf_wdata = s_prod[63:32];
+						end
+						3'b011: begin
+							u_prod = $unsigned(rs1_data) * $unsigned(rs2_data);
+							rf_wdata = u_prod[63:32];
+						end
+						3'b100, 3'b101, 3'b110, 3'b111: begin : sv2v_autoblock_2
+							reg div_by_zero;
+							reg signed_overflow;
+							reg a_neg;
+							reg b_neg;
+							reg [31:0] a_abs;
+							reg [31:0] b_abs;
+							reg [31:0] q_u;
+							reg [31:0] r_u;
+							reg [31:0] q_s;
+							reg [31:0] r_s;
+							div_by_zero = rs2_data == 32'd0;
+							signed_overflow = (rs1_data == 32'h80000000) && (rs2_data == 32'hffffffff);
+							a_neg = rs1_data[31];
+							b_neg = rs2_data[31];
+							a_abs = (a_neg ? ~rs1_data + 32'd1 : rs1_data);
+							b_abs = (b_neg ? ~rs2_data + 32'd1 : rs2_data);
+							q_u = div_q;
+							r_u = div_r;
+							q_s = (a_neg ^ b_neg ? ~q_u + 32'd1 : q_u);
+							r_s = (a_neg ? ~r_u + 32'd1 : r_u);
+							(* full_case, parallel_case *)
+							case (insn_funct3)
+								3'b100:
+									if (div_by_zero)
+										rf_wdata = 32'hffffffff;
+									else if (signed_overflow)
+										rf_wdata = 32'h80000000;
+									else
+										rf_wdata = q_s;
+								3'b101:
+									if (div_by_zero)
+										rf_wdata = 32'hffffffff;
+									else
+										rf_wdata = div_q;
+								3'b110:
+									if (div_by_zero)
+										rf_wdata = rs1_data;
+									else if (signed_overflow)
+										rf_wdata = 32'd0;
+									else
+										rf_wdata = r_s;
+								3'b111:
+									if (div_by_zero)
+										rf_wdata = rs1_data;
+									else
+										rf_wdata = div_r;
+								default: begin
+									illegal_insn = 1'b1;
+									rf_we = 1'b0;
+								end
+							endcase
+						end
+						default: begin
+							illegal_insn = 1'b1;
+							rf_we = 1'b0;
+						end
+					endcase
+				end
 				else
 					illegal_insn = 1'b1;
-			OpBranch: begin : sv2v_autoblock_1
+			OpBranch: begin : sv2v_autoblock_3
 				reg take_branch;
 				take_branch = 1'b0;
 				(* full_case, parallel_case *)
@@ -546,6 +740,75 @@ module DatapathSingleCycle (
 				endcase
 				if (!illegal_insn && take_branch)
 					pcNext = pcCurrent + imm_b_sext;
+			end
+			OpLoad: begin
+				eff_addr = rs1_data + imm_i_sext;
+				aligned_addr = {eff_addr[31:2], 2'b00};
+				addr_off = eff_addr[1:0];
+				addr_to_dmem = aligned_addr;
+				shifted = load_data_from_dmem >> (8 * addr_off);
+				load_byte = shifted[7:0];
+				shifted = load_data_from_dmem >> (16 * addr_off[1]);
+				load_half = shifted[15:0];
+				rf_we = 1'b1;
+				(* full_case, parallel_case *)
+				case (insn_funct3)
+					3'b000: rf_wdata = {{24 {load_byte[7]}}, load_byte};
+					3'b001:
+						if (addr_off[0] != 1'b0) begin
+							illegal_insn = 1'b1;
+							rf_we = 1'b0;
+						end
+						else
+							rf_wdata = {{16 {load_half[15]}}, load_half};
+					3'b010:
+						if (addr_off != 2'b00) begin
+							illegal_insn = 1'b1;
+							rf_we = 1'b0;
+						end
+						else
+							rf_wdata = load_data_from_dmem;
+					3'b100: rf_wdata = {24'd0, load_byte};
+					3'b101:
+						if (addr_off[0] != 1'b0) begin
+							illegal_insn = 1'b1;
+							rf_we = 1'b0;
+						end
+						else
+							rf_wdata = {16'd0, load_half};
+					default: begin
+						illegal_insn = 1'b1;
+						rf_we = 1'b0;
+					end
+				endcase
+			end
+			OpStore: begin
+				eff_addr = rs1_data + imm_s_sext;
+				aligned_addr = {eff_addr[31:2], 2'b00};
+				addr_off = eff_addr[1:0];
+				addr_to_dmem = aligned_addr;
+				(* full_case, parallel_case *)
+				case (insn_funct3)
+					3'b000: begin
+						store_we_to_dmem = 4'b0001 << addr_off;
+						store_data_to_dmem = {4 {rs2_data[7:0]}};
+					end
+					3'b001:
+						if (addr_off[0] != 1'b0)
+							illegal_insn = 1'b1;
+						else begin
+							store_we_to_dmem = 4'b0011 << addr_off;
+							store_data_to_dmem = {2 {rs2_data[15:0]}};
+						end
+					3'b010:
+						if (addr_off != 2'b00)
+							illegal_insn = 1'b1;
+						else begin
+							store_we_to_dmem = 4'b1111;
+							store_data_to_dmem = rs2_data;
+						end
+					default: illegal_insn = 1'b1;
+				endcase
 			end
 			default: illegal_insn = 1'b1;
 		endcase
