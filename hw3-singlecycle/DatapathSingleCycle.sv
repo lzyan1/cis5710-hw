@@ -208,9 +208,7 @@ module DatapathSingleCycle (
       num_insns_current <= 0;
     end else begin
       cycles_current <= cycles_current + 1;
-      if (!rst) begin
-        num_insns_current <= num_insns_current + 1;
-      end
+      num_insns_current <= num_insns_current + 1;
     end
   end
 
@@ -276,39 +274,21 @@ module DatapathSingleCycle (
   logic [31:0] shifted;
 
   always_comb begin
-    // defaults
+    // ALU defaults
     alu_a   = rs1_data;
     alu_b   = rs2_data;
     alu_cin = 1'b0;
 
+    if (insn_addi) alu_b = imm_i_sext;
+    if (insn_sub) begin alu_b = ~rs2_data; alu_cin = 1'b1; end
+
+    // Divider defaults (unsigned path; signed path overrides below)
     div_a = rs1_data;
     div_b = rs2_data;
-
-    // ADDI
-    if (insn_addi) begin
-      alu_b = imm_i_sext;
-    end
-
-    // SUB
-    if (insn_sub) begin
-      alu_b   = ~rs2_data;
-      alu_cin = 1'b1;
-    end
-
-    // signed div/rem: feed absolute values
     if (insn_div || insn_rem) begin
       div_a = rs1_data[31] ? (~rs1_data + 1) : rs1_data;
       div_b = rs2_data[31] ? (~rs2_data + 1) : rs2_data;
     end
-
-    // unsigned div/rem
-    if (insn_divu || insn_remu) begin
-      div_a = rs1_data;
-      div_b = rs2_data;
-    end
-  end
-
-  always_comb begin
     illegal_insn = 1'b0;
 
     trace_completed_pc = pcCurrent;

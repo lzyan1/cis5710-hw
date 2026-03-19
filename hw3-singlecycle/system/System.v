@@ -418,8 +418,7 @@ module DatapathSingleCycle (
 		end
 		else begin
 			cycles_current <= cycles_current + 1;
-			if (!rst)
-				num_insns_current <= num_insns_current + 1;
+			num_insns_current <= num_insns_current + 1;
 		end
 	reg rf_we;
 	reg [4:0] rf_rd;
@@ -475,26 +474,18 @@ module DatapathSingleCycle (
 		alu_a = rs1_data;
 		alu_b = rs2_data;
 		alu_cin = 1'b0;
-		div_a = rs1_data;
-		div_b = rs2_data;
 		if (insn_addi)
 			alu_b = imm_i_sext;
 		if (insn_sub) begin
 			alu_b = ~rs2_data;
 			alu_cin = 1'b1;
 		end
+		div_a = rs1_data;
+		div_b = rs2_data;
 		if (insn_div || insn_rem) begin
 			div_a = (rs1_data[31] ? ~rs1_data + 1 : rs1_data);
 			div_b = (rs2_data[31] ? ~rs2_data + 1 : rs2_data);
 		end
-		if (insn_divu || insn_remu) begin
-			div_a = rs1_data;
-			div_b = rs2_data;
-		end
-	end
-	always @(*) begin
-		if (_sv2v_0)
-			;
 		illegal_insn = 1'b0;
 		trace_completed_pc = pcCurrent;
 		trace_completed_insn = insn_from_imem;

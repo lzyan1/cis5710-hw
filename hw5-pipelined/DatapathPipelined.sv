@@ -16,7 +16,7 @@
 `ifndef SYNTHESIS
 `include "../hw3-singlecycle/RvDisassembler.sv"
 `endif
-`include "../hw2b-cla/cla.sv"
+`include "../hw2b-cla/CarryLookaheadAdder.sv"
 `include "../hw4-multicycle/DividerUnsignedPipelined.sv"
 `include "../hw3-singlecycle/cycle_status.sv"
 
@@ -148,9 +148,9 @@ module DatapathPipelined (
     output logic [`REG_SIZE] store_data_to_dmem,
     output logic [3:0] store_we_to_dmem,
     output logic halt,
-    output logic [`REG_SIZE] trace_writeback_pc,
-    output logic [`INSN_SIZE] trace_writeback_insn,
-    output cycle_status_e trace_writeback_cycle_status
+    output logic [`REG_SIZE] trace_completed_pc,
+    output logic [`INSN_SIZE] trace_completed_insn,
+    output cycle_status_e trace_completed_cycle_status
 );
  
   // opcodes
@@ -388,7 +388,7 @@ module DatapathPipelined (
   logic             x_alu_cin;
   wire  [`REG_SIZE] x_alu_sum;
  
-  cla u_cla (
+  CarryLookaheadAdder u_cla (
       .a  (x_alu_a),
       .b  (x_alu_b),
       .cin(x_alu_cin),
@@ -660,14 +660,10 @@ module DatapathPipelined (
   assign w_rd      = writeback_state.rd;
   assign w_rd_data = writeback_state.rd_data;
  
-  assign trace_writeback_pc           = writeback_state.pc;
-  assign trace_writeback_insn         = writeback_state.insn;
-  assign trace_writeback_cycle_status = writeback_state.cycle_status;
- 
-  wire [`REG_SIZE]  trace_completed_pc           = writeback_state.pc;
-  wire [`INSN_SIZE] trace_completed_insn          = writeback_state.insn;
-  cycle_status_e    trace_completed_cycle_status;
+  assign trace_completed_pc           = writeback_state.pc;
+  assign trace_completed_insn         = writeback_state.insn;
   assign trace_completed_cycle_status = writeback_state.cycle_status;
+ 
  
 endmodule
 
@@ -789,9 +785,9 @@ module Processor (
       .store_we_to_dmem(mem_data_we),
       .load_data_from_dmem(mem_data_loaded_value),
       .halt(halt),
-      .trace_writeback_pc(trace_writeback_pc),
-      .trace_writeback_insn(trace_writeback_insn),
-      .trace_writeback_cycle_status(trace_writeback_cycle_status)
+      .trace_completed_pc(trace_writeback_pc),
+      .trace_completed_insn(trace_writeback_insn),
+      .trace_completed_cycle_status(trace_writeback_cycle_status)
   );
 
 endmodule
