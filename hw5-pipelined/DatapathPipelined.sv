@@ -18,7 +18,7 @@
 `endif
 `include "../hw2b-cla/cla.sv"
 `include "../hw4-multicycle/DividerUnsignedPipelined.sv"
-`include "cycle_status.sv"
+`include "../hw3-singlecycle/cycle_status.sv"
 
 module Disasm #(
     byte PREFIX = "D"
