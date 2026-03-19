@@ -2,6 +2,7 @@
 input_string:   .asciz "Hello world!"
 
         # tohost/fromhost are data locations used by Spike
+        # test
         .align 8
 tohost: .byte 0
         .align 8
