@@ -11,7 +11,7 @@ ZIP_FILE=single.zip
 include ../common/make/fpga.mk
 
 ifndef CLOCK_FREQUENCY
-CLOCK_FREQUENCY=4
+CLOCK_FREQUENCY=3.5
 endif
 
 CLOCK_GEN_NAME=MyClockGen

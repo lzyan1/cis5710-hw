@@ -9,7 +9,7 @@ module MyClockGen (
 	output wire clk_mem;
 	output wire locked;
 	wire clkfb;
-	(* FREQUENCY_PIN_CLKI = "25" *) (* FREQUENCY_PIN_CLKOP = "3.57143" *) (* FREQUENCY_PIN_CLKOS = "3.50932" *) (* ICP_CURRENT = "12" *) (* LPF_RESISTOR = "8" *) (* MFG_ENABLE_FILTEROPAMP = "1" *) (* MFG_GMCREF_SEL = "2" *) EHXPLLL #(
+	(* FREQUENCY_PIN_CLKI = "25" *) (* FREQUENCY_PIN_CLKOP = "10" *) (* FREQUENCY_PIN_CLKOS = "10" *) (* ICP_CURRENT = "12" *) (* LPF_RESISTOR = "8" *) (* MFG_ENABLE_FILTEROPAMP = "1" *) (* MFG_GMCREF_SEL = "2" *) EHXPLLL #(
 		.PLLRST_ENA("DISABLED"),
 		.INTFB_WAKE("DISABLED"),
 		.STDBY_ENABLE("DISABLED"),
@@ -18,17 +18,17 @@ module MyClockGen (
 		.OUTDIVIDER_MUXB("DIVB"),
 		.OUTDIVIDER_MUXC("DIVC"),
 		.OUTDIVIDER_MUXD("DIVD"),
-		.CLKI_DIV(7),
+		.CLKI_DIV(5),
 		.CLKOP_ENABLE("ENABLED"),
-		.CLKOP_DIV(113),
-		.CLKOP_CPHASE(56),
+		.CLKOP_DIV(60),
+		.CLKOP_CPHASE(30),
 		.CLKOP_FPHASE(0),
 		.CLKOS_ENABLE("ENABLED"),
-		.CLKOS_DIV(115),
-		.CLKOS_CPHASE(84),
-		.CLKOS_FPHASE(5),
+		.CLKOS_DIV(60),
+		.CLKOS_CPHASE(45),
+		.CLKOS_FPHASE(0),
 		.FEEDBK_PATH("INT_OP"),
-		.CLKFB_DIV(1)
+		.CLKFB_DIV(2)
 	) pll_i(
 		.RST(1'b0),
 		.STDBY(1'b0),
@@ -46,70 +46,6 @@ module MyClockGen (
 		.ENCLKOP(1'b0),
 		.LOCK(locked)
 	);
-endmodule
-module DividerUnsigned (
-	i_dividend,
-	i_divisor,
-	o_remainder,
-	o_quotient
-);
-	input wire [31:0] i_dividend;
-	input wire [31:0] i_divisor;
-	output wire [31:0] o_remainder;
-	output wire [31:0] o_quotient;
-	wire [31:0] dvd [0:32];
-	wire [31:0] rem [0:32];
-	wire [31:0] quo [0:32];
-	assign dvd[0] = i_dividend;
-	assign rem[0] = 32'b00000000000000000000000000000000;
-	assign quo[0] = 32'b00000000000000000000000000000000;
-	genvar _gv_i_1;
-	generate
-		for (_gv_i_1 = 0; _gv_i_1 < 32; _gv_i_1 = _gv_i_1 + 1) begin : genblk1
-			localparam i = _gv_i_1;
-			DividerOneIter f(
-				.i_dividend(dvd[i]),
-				.i_divisor(i_divisor),
-				.i_remainder(rem[i]),
-				.i_quotient(quo[i]),
-				.o_dividend(dvd[i + 1]),
-				.o_remainder(rem[i + 1]),
-				.o_quotient(quo[i + 1])
-			);
-		end
-	endgenerate
-	assign o_remainder = rem[32];
-	assign o_quotient = quo[32];
-endmodule
-module DividerOneIter (
-	i_dividend,
-	i_divisor,
-	i_remainder,
-	i_quotient,
-	o_dividend,
-	o_remainder,
-	o_quotient
-);
-	input wire [31:0] i_dividend;
-	input wire [31:0] i_divisor;
-	input wire [31:0] i_remainder;
-	input wire [31:0] i_quotient;
-	output wire [31:0] o_dividend;
-	output wire [31:0] o_remainder;
-	output wire [31:0] o_quotient;
-	wire [31:0] r_shift;
-	wire lt;
-	wire [31:0] q0;
-	wire [31:0] q1;
-	wire [31:0] r_sub;
-	assign r_shift = {i_remainder[30:0], i_dividend[31]};
-	assign lt = r_shift < i_divisor;
-	assign q0 = {i_quotient[30:0], 1'b0};
-	assign q1 = {i_quotient[30:0], 1'b1};
-	assign r_sub = r_shift - i_divisor;
-	assign o_quotient = (lt ? q0 : q1);
-	assign o_remainder = (lt ? r_shift : r_sub);
-	assign o_dividend = {i_dividend[30:0], 1'b0};
 endmodule
 module gp1 (
 	a,
@@ -180,10 +116,10 @@ module CarryLookaheadAdder (
 	output wire [31:0] sum;
 	wire [31:0] g;
 	wire [31:0] p;
-	genvar _gv_i_2;
+	genvar _gv_i_1;
 	generate
-		for (_gv_i_2 = 0; _gv_i_2 < 32; _gv_i_2 = _gv_i_2 + 1) begin : GEN_GP1
-			localparam i = _gv_i_2;
+		for (_gv_i_1 = 0; _gv_i_1 < 32; _gv_i_1 = _gv_i_1 + 1) begin : GEN_GP1
+			localparam i = _gv_i_1;
 			gp1 u_gp1(
 				.a(a[i]),
 				.b(b[i]),
@@ -246,11 +182,136 @@ module CarryLookaheadAdder (
 				assign cbit[(4 * k) + 3] = cout4[k][2];
 			end
 		end
-		for (_gv_i_2 = 0; _gv_i_2 < 32; _gv_i_2 = _gv_i_2 + 1) begin : GEN_SUM
-			localparam i = _gv_i_2;
+		for (_gv_i_1 = 0; _gv_i_1 < 32; _gv_i_1 = _gv_i_1 + 1) begin : GEN_SUM
+			localparam i = _gv_i_1;
 			assign sum[i] = (a[i] ^ b[i]) ^ cbit[i];
 		end
 	endgenerate
+endmodule
+module DividerUnsignedPipelined (
+	clk,
+	rst,
+	stall,
+	i_dividend,
+	i_divisor,
+	o_remainder,
+	o_quotient
+);
+	input wire clk;
+	input wire rst;
+	input wire stall;
+	input wire [31:0] i_dividend;
+	input wire [31:0] i_divisor;
+	output wire [31:0] o_remainder;
+	output wire [31:0] o_quotient;
+	reg [127:0] stage [0:8];
+	wire [32:1] sv2v_tmp_6804F;
+	assign sv2v_tmp_6804F = i_dividend;
+	always @(*) stage[0][127-:32] = sv2v_tmp_6804F;
+	wire [32:1] sv2v_tmp_13CA0;
+	assign sv2v_tmp_13CA0 = i_divisor;
+	always @(*) stage[0][95-:32] = sv2v_tmp_13CA0;
+	wire [32:1] sv2v_tmp_A6EAC;
+	assign sv2v_tmp_A6EAC = 32'b00000000000000000000000000000000;
+	always @(*) stage[0][63-:32] = sv2v_tmp_A6EAC;
+	wire [32:1] sv2v_tmp_ECDDB;
+	assign sv2v_tmp_ECDDB = 32'b00000000000000000000000000000000;
+	always @(*) stage[0][31-:32] = sv2v_tmp_ECDDB;
+	genvar _gv_s_1;
+	generate
+		for (_gv_s_1 = 0; _gv_s_1 < 8; _gv_s_1 = _gv_s_1 + 1) begin : stage_block
+			localparam s = _gv_s_1;
+			wire [31:0] d1;
+			wire [31:0] d2;
+			wire [31:0] d3;
+			wire [31:0] d4;
+			wire [31:0] r1;
+			wire [31:0] r2;
+			wire [31:0] r3;
+			wire [31:0] r4;
+			wire [31:0] q1;
+			wire [31:0] q2;
+			wire [31:0] q3;
+			wire [31:0] q4;
+			DividerOneIter i0(
+				.i_dividend(stage[s][127-:32]),
+				.i_divisor(stage[s][95-:32]),
+				.i_remainder(stage[s][63-:32]),
+				.i_quotient(stage[s][31-:32]),
+				.o_dividend(d1),
+				.o_remainder(r1),
+				.o_quotient(q1)
+			);
+			DividerOneIter i1(
+				.i_dividend(d1),
+				.i_divisor(stage[s][95-:32]),
+				.i_remainder(r1),
+				.i_quotient(q1),
+				.o_dividend(d2),
+				.o_remainder(r2),
+				.o_quotient(q2)
+			);
+			DividerOneIter i2(
+				.i_dividend(d2),
+				.i_divisor(stage[s][95-:32]),
+				.i_remainder(r2),
+				.i_quotient(q2),
+				.o_dividend(d3),
+				.o_remainder(r3),
+				.o_quotient(q3)
+			);
+			DividerOneIter i3(
+				.i_dividend(d3),
+				.i_divisor(stage[s][95-:32]),
+				.i_remainder(r3),
+				.i_quotient(q3),
+				.o_dividend(d4),
+				.o_remainder(r4),
+				.o_quotient(q4)
+			);
+			always @(posedge clk)
+				if (rst)
+					stage[s + 1] <= 1'sb0;
+				else if (!stall) begin
+					stage[s + 1][127-:32] <= d4;
+					stage[s + 1][95-:32] <= stage[s][95-:32];
+					stage[s + 1][63-:32] <= r4;
+					stage[s + 1][31-:32] <= q4;
+				end
+		end
+	endgenerate
+	assign o_remainder = stage_block[7].r4;
+	assign o_quotient = stage_block[7].q4;
+endmodule
+module DividerOneIter (
+	i_dividend,
+	i_divisor,
+	i_remainder,
+	i_quotient,
+	o_dividend,
+	o_remainder,
+	o_quotient
+);
+	input wire [31:0] i_dividend;
+	input wire [31:0] i_divisor;
+	input wire [31:0] i_remainder;
+	input wire [31:0] i_quotient;
+	output wire [31:0] o_dividend;
+	output wire [31:0] o_remainder;
+	output wire [31:0] o_quotient;
+	wire [31:0] r_shift;
+	wire lt;
+	wire [31:0] q0;
+	wire [31:0] q1;
+	wire [31:0] r_sub;
+	assign r_shift = {i_remainder[30:0], i_dividend[31]};
+	assign lt = r_shift < i_divisor;
+	assign q0 = {i_quotient[30:0], 1'b0};
+	assign q1 = {i_quotient[30:0], 1'b1};
+	assign r_sub = r_shift - i_divisor;
+	assign o_quotient = (lt ? q0 : q1);
+	assign o_remainder = (lt ? r_shift : r_sub);
+	assign o_dividend = {i_dividend[30:0], 1'b0};
 endmodule
 module RegFile (
 	rd,
@@ -293,7 +354,7 @@ module RegFile (
 		end
 	initial _sv2v_0 = 0;
 endmodule
-module DatapathSingleCycle (
+module DatapathMultiCycle (
 	clk,
 	rst,
 	halt,
@@ -457,7 +518,10 @@ module DatapathSingleCycle (
 		.cin(alu_cin),
 		.sum(alu_sum)
 	);
-	DividerUnsigned u_divu(
+	DividerUnsignedPipelined u_divu(
+		.clk(clk),
+		.rst(rst),
+		.stall(1'b0),
 		.i_dividend(div_a),
 		.i_divisor(div_b),
 		.o_quotient(div_q),
@@ -492,6 +556,16 @@ module DatapathSingleCycle (
 			div_b = rs2_data;
 		end
 	end
+	wire is_div = ((insn_div || insn_divu) || insn_rem) || insn_remu;
+	reg [7:0] div_stall_sr;
+	always @(posedge clk)
+		if (rst)
+			div_stall_sr <= 8'b00000000;
+		else if (is_div && (div_stall_sr == 8'b00000000))
+			div_stall_sr <= 8'hff;
+		else
+			div_stall_sr <= div_stall_sr >> 1;
+	wire div_stalling = is_div && (div_stall_sr != 8'b00000001);
 	always @(*) begin
 		if (_sv2v_0)
 			;
@@ -812,6 +886,11 @@ module DatapathSingleCycle (
 			end
 			default: illegal_insn = 1'b1;
 		endcase
+		if (div_stalling) begin
+			pcNext = pcCurrent;
+			rf_we = 1'b0;
+			trace_completed_cycle_status = 32'd2;
+		end
 	end
 	initial _sv2v_0 = 0;
 endmodule
@@ -863,73 +942,7 @@ module MemorySingleCycle (
 		end
 	initial _sv2v_0 = 0;
 endmodule
-`default_nettype none
-module debouncer (
-	i_clk,
-	i_in,
-	o_debounced,
-	o_debug
-);
-	parameter NIN = 21;
-	parameter LGWAIT = 17;
-	input wire i_clk;
-	input wire [NIN - 1:0] i_in;
-	output reg [NIN - 1:0] o_debounced;
-	output wire [30:0] o_debug;
-	reg different;
-	reg ztimer;
-	reg [NIN - 1:0] r_in;
-	reg [NIN - 1:0] q_in;
-	reg [NIN - 1:0] r_last;
-	reg [LGWAIT - 1:0] timer;
-	initial q_in = 0;
-	initial r_in = 0;
-	initial different = 0;
-	always @(posedge i_clk) q_in <= i_in;
-	always @(posedge i_clk) r_in <= q_in;
-	always @(posedge i_clk) r_last <= r_in;
-	initial ztimer = 1'b1;
-	initial timer = 0;
-	always @(posedge i_clk)
-		if (ztimer && different) begin
-			timer <= {LGWAIT {1'b1}};
-			ztimer <= 1'b0;
-		end
-		else if (!ztimer) begin
-			timer <= timer - 1'b1;
-			ztimer <= timer[LGWAIT - 1:1] == 0;
-		end
-		else begin
-			ztimer <= 1'b1;
-			timer <= 0;
-		end
-	always @(posedge i_clk) different <= (different && !ztimer) || (r_in != o_debounced);
-	initial o_debounced = {NIN {1'b0}};
-	always @(posedge i_clk)
-		if (ztimer)
-			o_debounced <= r_last;
-	reg trigger;
-	initial trigger = 1'b0;
-	always @(posedge i_clk) trigger <= (((!ztimer && !different) && !(|i_in)) && (timer[LGWAIT - 1:2] == 0)) && timer[1];
-	wire [30:0] debug;
-	assign debug[30] = ztimer;
-	assign debug[29] = trigger;
-	assign debug[28] = 1'b0;
-	generate
-		if (NIN >= 14) begin : genblk1
-			assign debug[27:14] = o_debounced[13:0];
-			assign debug[13:0] = r_in[13:0];
-		end
-		else begin : genblk1
-			assign debug[27:14 + NIN] = 0;
-			assign debug[(14 + NIN) - 1:14] = o_debounced;
-			assign debug[13:NIN] = 0;
-			assign debug[NIN - 1:0] = r_in;
-		end
-	endgenerate
-	assign o_debug = debug;
-endmodule
-module SystemDemo (
+module SystemResourceCheck (
 	external_clk_25MHz,
 	btn,
 	led
@@ -937,17 +950,7 @@ module SystemDemo (
 	input wire external_clk_25MHz;
 	input wire [6:0] btn;
 	output wire [7:0] led;
-	localparam signed [31:0] MmapButtons = 32'hff001000;
-	localparam signed [31:0] MmapLeds = 32'hff002000;
-	wire rst_button_n;
-	wire [30:0] ignore;
 	wire clk_proc;
-	debouncer #(.NIN(1)) db(
-		.i_clk(clk_proc),
-		.i_in(btn[0]),
-		.o_debounced(rst_button_n),
-		.o_debug(ignore)
-	);
 	wire clk_mem;
 	wire clk_locked;
 	MyClockGen clock_gen(
@@ -956,40 +959,31 @@ module SystemDemo (
 		.clk_mem(clk_mem),
 		.locked(clk_locked)
 	);
-	wire rst = !rst_button_n || !clk_locked;
 	wire [31:0] pc_to_imem;
 	wire [31:0] insn_from_imem;
 	wire [31:0] mem_data_addr;
 	wire [31:0] mem_data_loaded_value;
 	wire [31:0] mem_data_to_write;
 	wire [3:0] mem_data_we;
-	reg [7:0] led_state;
-	assign led = led_state;
-	always @(posedge clk_mem)
-		if (rst)
-			led_state <= 0;
-		else if ((mem_data_addr == MmapLeds) && (mem_data_we[0] == 1))
-			led_state <= mem_data_to_write[7:0];
-	MemorySingleCycle #(.NUM_WORDS(1024)) memory(
-		.rst(rst),
+	MemorySingleCycle #(.NUM_WORDS(128)) memory(
+		.rst(!clk_locked),
 		.clock_mem(clk_mem),
 		.pc_to_imem(pc_to_imem),
 		.insn_from_imem(insn_from_imem),
 		.addr_to_dmem(mem_data_addr),
 		.load_data_from_dmem(mem_data_loaded_value),
 		.store_data_to_dmem(mem_data_to_write),
-		.store_we_to_dmem((mem_data_addr == MmapLeds ? 4'd0 : mem_data_we))
+		.store_we_to_dmem(mem_data_we)
 	);
-	wire halt;
-	DatapathSingleCycle datapath(
+	DatapathMultiCycle datapath(
 		.clk(clk_proc),
-		.rst(rst),
+		.rst(!clk_locked),
 		.pc_to_imem(pc_to_imem),
 		.insn_from_imem(insn_from_imem),
 		.addr_to_dmem(mem_data_addr),
 		.store_data_to_dmem(mem_data_to_write),
 		.store_we_to_dmem(mem_data_we),
-		.load_data_from_dmem((mem_data_addr == MmapButtons ? {25'd0, btn} : mem_data_loaded_value)),
-		.halt(halt)
+		.load_data_from_dmem(mem_data_loaded_value),
+		.halt(led[0])
 	);
 endmodule

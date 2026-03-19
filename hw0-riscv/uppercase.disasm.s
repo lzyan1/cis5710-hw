@@ -10,7 +10,7 @@ Disassembly of section .text:
 
 0001007c <loop>:
    1007c:	00054283          	lbu	t0,0(a0)
-   10080:	02028263          	beqz	t0,100a4 <end_program>
+   10080:	02500263          	beq	zero,t0,100a4 <end_program>
    10084:	06100313          	li	t1,97
    10088:	0062ea63          	bltu	t0,t1,1009c <skip>
    1008c:	07b00313          	li	t1,123
