@@ -174,13 +174,12 @@ module DatapathPipelined (
   end
  
   // =====================================================
-  // FETCH STAGE
+  // FETCH
   // =====================================================
  
   logic [`REG_SIZE] f_pc_current;
   cycle_status_e    f_cycle_status;
  
-  // branch redirect signals (set in Execute)
   logic             x_branch_taken;
   logic [`REG_SIZE] x_branch_target;
  
@@ -212,8 +211,6 @@ module DatapathPipelined (
   // =====================================================
  
   stage_decode_t decode_state;
- 
-  // flush_fd: insert bubbles into F/D when branch taken
   wire flush_fd = x_branch_taken;
  
   always_ff @(posedge clk) begin
@@ -236,7 +233,7 @@ module DatapathPipelined (
       .disasm(d_disasm)
   );
  
-  // ---- Decode the instruction ----
+  // ---- decode insn ----
   wire [`OPCODE_SIZE] d_opcode   = decode_state.insn[6:0];
   wire [4:0]          d_rd       = decode_state.insn[11:7];
   wire [2:0]          d_funct3   = decode_state.insn[14:12];
@@ -264,15 +261,14 @@ module DatapathPipelined (
   wire [`REG_SIZE] d_imm_j_sext = {{11{d_imm_j[20]}},  d_imm_j};
   wire [`REG_SIZE] d_imm_u      = {decode_state.insn[31:12], 12'b0};
  
-  // RegFile read (WD bypass lives inside RegFile)
+  // RegFile read (WD bypass inside RegFile)
   logic [`REG_SIZE] d_rs1_data, d_rs2_data;
  
-  // RegFile wires driven by Writeback
+  // RegFile wires from writeback
   logic        w_rf_we;
   logic [4:0]  w_rd;
   logic [`REG_SIZE] w_rd_data;
- 
-  // NOTE: testbench requires instance name `rf`
+
   RegFile rf (
       .clk    (clk),
       .rst    (rst),
@@ -285,7 +281,7 @@ module DatapathPipelined (
       .rs2_data(d_rs2_data)
   );
  
-  // rf_we for this instruction (basic: 1 for most, 0 for branches/stores)
+  // rf_we
   logic d_rf_we;
   always_comb begin
     case (d_opcode)
@@ -301,8 +297,7 @@ module DatapathPipelined (
  
   stage_execute_t execute_state;
  
-  // flush_dx: also flush the D/X register when branch taken
-  // (the insn that was in Decode gets squashed too)
+  // flush the D/X register when branch taken
   wire flush_dx = x_branch_taken;
  
   always_ff @(posedge clk) begin
@@ -351,18 +346,17 @@ module DatapathPipelined (
   // EXECUTE STAGE
   // =====================================================
  
-  // Decode fields from execute_state.insn
   wire [`OPCODE_SIZE] x_opcode = execute_state.insn[6:0];
   wire [2:0]          x_funct3 = execute_state.insn[14:12];
   wire [6:0]          x_funct7 = execute_state.insn[31:25];
   wire [4:0]          x_imm_shamt = execute_state.insn[24:20];
  
-  // X/M and M/W pipeline register values (for bypass)
+  // X/M and M/W pipeline register values for bypass
   stage_memory_t    memory_state;
   stage_writeback_t writeback_state;
  
-  // MX bypass: memory_state.rd_data (ALU result from insn now in M)
-  // WX bypass: writeback_state.rd_data (result from insn now in W)
+  // MX bypass: memory_state.rd_data
+  // WX bypass: writeback_state.rd_data
   logic [`REG_SIZE] x_rs1, x_rs2;
  
   always_comb begin
@@ -411,7 +405,6 @@ module DatapathPipelined (
   wire signed [`REG_SIZE] x_s_imm_i = $signed(execute_state.imm_i_sext);
  
   always_comb begin
-    // adder defaults
     x_alu_a   = x_rs1;
     x_alu_b   = x_rs2;
     x_alu_cin = 1'b0;
@@ -429,7 +422,7 @@ module DatapathPipelined (
         x_rd_data = execute_state.imm_u;
       end
  
-      // ---- AUIPC ---- (not required for M1 but harmless to include)
+      // ---- AUIPC ----
       OpcodeAuipc: begin
         x_rd_data = execute_state.pc + execute_state.imm_u;
       end
@@ -451,7 +444,7 @@ module DatapathPipelined (
         x_branch_target = {x_alu_sum[31:1], 1'b0};
       end
  
-      // ---- I-TYPE (RegImm) ----
+      // ---- I-TYPE ----
       OpcodeRegImm: begin
         case (x_funct3)
           3'b000: begin // addi
@@ -488,7 +481,7 @@ module DatapathPipelined (
         endcase
       end
  
-      // ---- R-TYPE (RegReg) ----
+      // ---- R-TYPE ----
       OpcodeRegReg: begin
         if (x_funct7 == 7'd0) begin
           case (x_funct3)
@@ -519,7 +512,6 @@ module DatapathPipelined (
             default: x_rf_we = 1'b0;
           endcase
         end else if (x_funct7 == 7'd1) begin
-          // MUL family (no div in M1)
           logic [63:0] u_prod;
           logic signed [63:0] s_prod;
           u_prod = 64'd0;
@@ -668,12 +660,10 @@ module DatapathPipelined (
   assign w_rd      = writeback_state.rd;
   assign w_rd_data = writeback_state.rd_data;
  
-  // trace outputs (writeback_* are the official ports; completed_* aliases for testbench compatibility)
   assign trace_writeback_pc           = writeback_state.pc;
   assign trace_writeback_insn         = writeback_state.insn;
   assign trace_writeback_cycle_status = writeback_state.cycle_status;
  
-  // aliases the testbench accesses directly on dut.datapath
   wire [`REG_SIZE]  trace_completed_pc           = writeback_state.pc;
   wire [`INSN_SIZE] trace_completed_insn          = writeback_state.insn;
   cycle_status_e    trace_completed_cycle_status;
