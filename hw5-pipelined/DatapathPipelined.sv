@@ -96,26 +96,28 @@ typedef struct packed {
   cycle_status_e cycle_status;
 } stage_decode_t;
 
+/** state at the start of X stage */
 typedef struct packed {
   logic [`REG_SIZE]  pc;
   logic [`INSN_SIZE] insn;
   cycle_status_e     cycle_status;
-  // decoded register indices
+  
   logic [4:0]        rs1;
   logic [4:0]        rs2;
   logic [4:0]        rd;
-  // register values (after WD bypass)
+
   logic [`REG_SIZE]  rs1_data;
   logic [`REG_SIZE]  rs2_data;
-  // immediates
+
   logic [`REG_SIZE]  imm_i_sext;
   logic [`REG_SIZE]  imm_b_sext;
   logic [`REG_SIZE]  imm_j_sext;
-  logic [`REG_SIZE]  imm_u;       // for LUI
-  // control bits (only what Execute needs)
+  logic [`REG_SIZE]  imm_u; // LUI
+
   logic              rf_we;
 } stage_execute_t;
  
+ /** state at the start of M stage */
 typedef struct packed {
   logic [`REG_SIZE]  pc;
   logic [`INSN_SIZE] insn;
@@ -123,8 +125,10 @@ typedef struct packed {
   logic [4:0]        rd;
   logic [`REG_SIZE]  rd_data;
   logic              rf_we;
+  logic              halt;
 } stage_memory_t;
- 
+
+ /** state at the start of W stage */
 typedef struct packed {
   logic [`REG_SIZE]  pc;
   logic [`INSN_SIZE] insn;
@@ -592,7 +596,7 @@ module DatapathPipelined (
     if (rst) begin
       memory_state <= '{
         pc: 0, insn: 0, cycle_status: CYCLE_RESET,
-        rd: 0, rd_data: 0, rf_we: 0
+        rd: 0, rd_data: 0, rf_we: 0, halt: 0
       };
     end else begin
       memory_state <= '{
@@ -601,7 +605,8 @@ module DatapathPipelined (
         cycle_status: execute_state.cycle_status,
         rd:           execute_state.rd,
         rd_data:      x_rd_data,
-        rf_we:        x_rf_we
+        rf_we:        x_rf_we,
+        halt:         x_halt
       };
     end
   end
@@ -625,7 +630,7 @@ module DatapathPipelined (
   // halt propagates through pipeline; drive it from writeback
   // (simpler: just use combinational from execute for M1 since
   //  ecall is the only source and we want it to stop immediately)
-  assign halt = x_halt;
+  assign halt = memory_state.halt;
  
   // =====================================================
   // M/W PIPELINE REGISTER
