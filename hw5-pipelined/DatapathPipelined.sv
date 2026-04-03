@@ -145,6 +145,20 @@ typedef struct packed {
   logic              rf_we;
 } stage_writeback_t;
 
+/** one stage of the parallel div pipeline (Q0..Q7) */
+typedef struct packed {
+  logic              valid;
+  logic [`REG_SIZE]  pc;
+  logic [`INSN_SIZE] insn;
+  cycle_status_e     cycle_status;
+  logic [4:0]        rd;
+  logic [2:0]        funct3;
+  logic              rs1_neg;        // sign bit of original rs1
+  logic              rs2_neg;        // sign bit of original rs2
+  logic [`REG_SIZE]  rs1_val;        // original rs1 (div-by-zero / rem)
+  logic [`REG_SIZE]  rs2_val;        // original rs2 (div-by-zero detection)
+} stage_divq_t;
+
 module DatapathPipelined (
     input wire clk,
     input wire rst,
@@ -196,7 +210,7 @@ module DatapathPipelined (
       f_cycle_status <= CYCLE_NO_STALL;
     end else begin
       f_cycle_status <= CYCLE_NO_STALL;
-      if (d_load_use_stall)
+      if (d_load_use_stall || d_div_stall || div_structural_stall)
         f_pc_current <= f_pc_current;        // hold — re-fetch same insn next cycle
       else if (x_branch_taken)
         f_pc_current <= x_branch_target;
@@ -227,7 +241,7 @@ module DatapathPipelined (
       decode_state <= '{pc: 0, insn: 0, cycle_status: CYCLE_RESET};
     end else if (flush_fd) begin
       decode_state <= '{pc: 0, insn: 0, cycle_status: CYCLE_TAKEN_BRANCH};
-    end else if (d_load_use_stall) begin
+    end else if (d_load_use_stall || d_div_stall || div_structural_stall) begin
       decode_state <= decode_state;          // hold
     end else begin
       decode_state <= '{
@@ -276,10 +290,38 @@ module DatapathPipelined (
 
   // load-use hazard: load in Execute, dependent insn in Decode
   wire x_is_load_in_exec = (execute_state.insn[6:0] == OpcodeLoad);
-  wire d_load_use_stall  = x_is_load_in_exec
-                        && (execute_state.rd != 5'd0)
-                        && ((execute_state.rd == d_rs1)
-                          || (execute_state.rd == d_rs2));
+  logic d_uses_rs1, d_uses_rs2;
+
+  always_comb begin
+    d_uses_rs1 = 1'b0;
+    d_uses_rs2 = 1'b0;
+
+    case (d_opcode)
+      OpcodeLoad,
+      OpcodeRegImm,
+      OpcodeJalr: begin
+        d_uses_rs1 = 1'b1;
+      end
+
+      OpcodeStore,
+      OpcodeBranch,
+      OpcodeRegReg: begin
+        d_uses_rs1 = 1'b1;
+        d_uses_rs2 = 1'b1;
+      end
+
+      default: begin
+        d_uses_rs1 = 1'b0;
+        d_uses_rs2 = 1'b0;
+      end
+    endcase
+  end
+
+  wire d_load_use_stall =
+      x_is_load_in_exec &&
+      (execute_state.rd != 5'd0) &&
+      ((d_uses_rs1 && execute_state.rd == d_rs1) ||
+      (d_uses_rs2 && execute_state.rd == d_rs2));
   
   // RegFile read (WD bypass inside RegFile)
   logic [`REG_SIZE] d_rs1_data, d_rs2_data;
@@ -332,6 +374,16 @@ module DatapathPipelined (
     end else if (flush_dx) begin
       execute_state <= '{
         pc: 0, insn: 0, cycle_status: CYCLE_TAKEN_BRANCH,
+        rs1: 0, rs2: 0, rd: 0,
+        rs1_data: 0, rs2_data: 0,
+        imm_i_sext: 0, imm_b_sext: 0, imm_j_sext: 0, imm_s_sext: 0, imm_u: 0,
+        rf_we: 0
+      };
+    end else if (div_structural_stall) begin
+      execute_state <= execute_state;  // hold real insn while div takes M slot
+    end else if (d_div_stall) begin
+      execute_state <= '{
+        pc: 0, insn: 0, cycle_status: CYCLE_DIV,
         rs1: 0, rs2: 0, rd: 0,
         rs1_data: 0, rs2_data: 0,
         imm_i_sext: 0, imm_b_sext: 0, imm_j_sext: 0, imm_s_sext: 0, imm_u: 0,
@@ -428,7 +480,140 @@ module DatapathPipelined (
       .cin(x_alu_cin),
       .sum(x_alu_sum)
   );
- 
+
+  // ── Parallel divide pipeline ────────────────────────────────────────────────
+  // Divider inputs are driven combinationally from x_rs1/x_rs2 so stage_block[0]
+  // captures the correct operands at the dispatch posedge.  There is no
+  // combinational loop because div_result (which reads x_div_quotient) lives in
+  // a separate always_comb that never writes back to div_op_a/b.
+  logic [`REG_SIZE] div_op_a, div_op_b;
+  wire  [`REG_SIZE] x_div_quotient, x_div_remainder;
+
+  always_comb begin
+    if (x_funct3 == 3'b100 || x_funct3 == 3'b110) begin
+      // signed div / rem: feed absolute values
+      div_op_a = x_rs1[31] ? (~x_rs1 + 32'd1) : x_rs1;
+      div_op_b = x_rs2[31] ? (~x_rs2 + 32'd1) : x_rs2;
+    end else begin
+      div_op_a = x_rs1;
+      div_op_b = x_rs2;
+    end
+  end
+
+  DividerUnsignedPipelined u_div (
+      .clk        (clk),
+      .rst        (rst),
+      .stall      (1'b0),
+      .i_dividend (div_op_a),
+      .i_divisor  (div_op_b),
+      .o_quotient (x_div_quotient),
+      .o_remainder(x_div_remainder)
+  );
+
+  // Detect a div/divu/rem/remu in the Execute stage.
+  wire x_is_div_op = (x_opcode == OpcodeRegReg) && (x_funct7 == 7'd1) &&
+                     (x_funct3 == 3'b100 || x_funct3 == 3'b101 ||
+                      x_funct3 == 3'b110 || x_funct3 == 3'b111);
+
+  // ── Q0..Q7: metadata pipeline running in parallel with the divider ──────────
+  stage_divq_t div_q[7];
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      for (int i = 0; i < 7; i++) div_q[i] <= '0;
+    end else begin
+      for (int i = 6; i > 0; i--) div_q[i] <= div_q[i-1];  // shift
+      if (x_is_div_op) begin
+        div_q[0] <= '{
+          valid:        1'b1,
+          pc:           execute_state.pc,
+          insn:         execute_state.insn,
+          cycle_status: execute_state.cycle_status,
+          rd:           execute_state.rd,
+          funct3:       x_funct3,
+          rs1_neg:      x_rs1[31],
+          rs2_neg:      x_rs2[31],
+          rs1_val:      x_rs1,
+          rs2_val:      x_rs2
+        };
+      end else begin
+        div_q[0] <= '0;
+      end
+    end
+  end
+
+  // Whether the insn currently in Decode is itself a div/divu/rem/remu.
+  wire d_is_div_op = (d_opcode == OpcodeRegReg) && (d_funct7 == 7'd1) &&
+                     (d_funct3 == 3'b100 || d_funct3 == 3'b101 ||
+                      d_funct3 == 3'b110 || d_funct3 == 3'b111);
+
+  // Any div in-flight (dispatching now or in Q0..Q5; Q6 fires this cycle into M).
+  wire div_inflight = x_is_div_op    ||
+                      div_q[0].valid || div_q[1].valid || div_q[2].valid ||
+                      div_q[3].valid || div_q[4].valid || div_q[5].valid;
+
+  // Dependency check: does the insn in Decode read a register any in-flight div writes?
+  wire d_div_dependent =
+    (x_is_div_op    && execute_state.rd != 5'd0
+                    && (execute_state.rd == d_rs1 || execute_state.rd == d_rs2)) ||
+    (div_q[0].valid && div_q[0].rd != 5'd0
+                    && (div_q[0].rd == d_rs1 || div_q[0].rd == d_rs2)) ||
+    (div_q[1].valid && div_q[1].rd != 5'd0
+                    && (div_q[1].rd == d_rs1 || div_q[1].rd == d_rs2)) ||
+    (div_q[2].valid && div_q[2].rd != 5'd0
+                    && (div_q[2].rd == d_rs1 || div_q[2].rd == d_rs2)) ||
+    (div_q[3].valid && div_q[3].rd != 5'd0
+                    && (div_q[3].rd == d_rs1 || div_q[3].rd == d_rs2)) ||
+    (div_q[4].valid && div_q[4].rd != 5'd0
+                    && (div_q[4].rd == d_rs1 || div_q[4].rd == d_rs2)) ||
+    (div_q[5].valid && div_q[5].rd != 5'd0
+                    && (div_q[5].rd == d_rs1 || div_q[5].rd == d_rs2));
+
+  // Stall rules:
+  //   - Non-div insn in Decode: stall if ANY div is in-flight.
+  //   - Div insn in Decode:     stall only if it has a register dependency on an
+  //                             in-flight div (independent back-to-back divs are allowed).
+  wire d_div_stall = div_inflight && (d_is_div_op ? d_div_dependent : 1'b1);
+
+  // Structural hazard: div_q[6] needs M but execute_state has a real insn.
+  // Hold X (and F/D) for one cycle and let the div inject into M first.
+  wire div_structural_stall = div_q[6].valid && (execute_state.insn != 32'd0);
+
+  // ── Result computation (used when div_q[6].valid) ───────────────────────────
+  // div_q[6] becomes valid exactly when o_quotient/o_remainder are correct:
+  // stage[7] was updated at posedge D+6 and o_quotient is combinational from it.
+  // memory_state's always_ff reads o_quotient before posedge D+7 overwrites stage[7].
+  logic [`REG_SIZE] div_result;
+  always_comb begin
+    logic div_by_zero, signed_overflow;
+    logic [`REG_SIZE] q_u, r_u, q_s, r_s;
+    div_result      = 32'd0;
+    div_by_zero     = 1'b0;
+    signed_overflow = 1'b0;
+    q_u = 32'd0;
+    r_u = 32'd0;
+    q_s = 32'd0;
+    r_s = 32'd0;
+    if (div_q[6].valid) begin
+      div_by_zero     = (div_q[6].rs2_val == 32'd0);
+      signed_overflow = (div_q[6].rs1_val == 32'h8000_0000) &&
+                        (div_q[6].rs2_val == 32'hFFFF_FFFF);
+      q_u = x_div_quotient;
+      r_u = x_div_remainder;
+      q_s = (div_q[6].rs1_neg ^ div_q[6].rs2_neg) ? (~q_u + 32'd1) : q_u;
+      r_s = div_q[6].rs1_neg ? (~r_u + 32'd1) : r_u;
+      case (div_q[6].funct3)
+        3'b100: div_result = div_by_zero      ? 32'hFFFF_FFFF :
+                             signed_overflow   ? 32'h8000_0000 : q_s;
+        3'b101: div_result = div_by_zero      ? 32'hFFFF_FFFF : x_div_quotient;
+        3'b110: div_result = div_by_zero      ? div_q[6].rs1_val :
+                             signed_overflow   ? 32'd0          : r_s;
+        3'b111: div_result = div_by_zero      ? div_q[6].rs1_val : x_div_remainder;
+        default: div_result = 32'd0;
+      endcase
+    end
+  end
+
   // ALU result and control
   logic [`REG_SIZE] x_rd_data;
   logic             x_rf_we;
@@ -454,7 +639,7 @@ module DatapathPipelined (
     x_mem_funct3 = 3'd0;
     x_mem_addr   = 32'd0;
     x_store_data = 32'd0;
- 
+
     case (x_opcode)
  
       // ---- LUI ----
@@ -573,6 +758,9 @@ module DatapathPipelined (
               u_prod    = $unsigned(x_rs1) * $unsigned(x_rs2);
               x_rd_data = u_prod[63:32];
             end
+            3'b100, 3'b101, 3'b110, 3'b111: begin // div / divu / rem / remu
+              x_rf_we = 1'b0; // result arrives via parallel Q pipeline
+            end
             default: x_rf_we = 1'b0;
           endcase
         end else begin
@@ -655,6 +843,26 @@ module DatapathPipelined (
         rd: 0, rd_data: 0, rf_we: 0, halt: 0,
         is_load: 0, is_store: 0, mem_funct3: 0, mem_addr: 0, store_data: 0
       };
+    end else if (div_q[6].valid) begin
+      // Q pipeline complete: inject div result into M stage.
+      // This takes priority over a simultaneous dispatch so the result is never lost.
+      memory_state <= '{
+        pc:           div_q[6].pc,
+        insn:         div_q[6].insn,
+        cycle_status: div_q[6].cycle_status,
+        rd:           div_q[6].rd,
+        rd_data:      div_result,
+        rf_we:        (div_q[6].rd != 5'd0),
+        halt:         1'b0,
+        is_load: 0, is_store: 0, mem_funct3: 0, mem_addr: 0, store_data: 0
+      };
+    end else if (x_is_div_op) begin
+      // Dispatch cycle: div goes to Q path — insert bubble in main pipeline
+      memory_state <= '{
+        pc: 0, insn: 0, cycle_status: CYCLE_DIV,
+        rd: 0, rd_data: 0, rf_we: 0, halt: 0,
+        is_load: 0, is_store: 0, mem_funct3: 0, mem_addr: 0, store_data: 0
+      };
     end else begin
       memory_state <= '{
         pc:           execute_state.pc,
@@ -689,6 +897,19 @@ module DatapathPipelined (
   logic [15:0] m_load_half;
 
   assign halt = memory_state.halt;
+
+  // WM bypass: when a store is in M and W is writing the store's rs2 register,
+  // forward W's result rather than the (potentially stale) latched store_data.
+  wire [4:0]        m_store_rs2 = memory_state.insn[24:20]; // rs2 for S-type
+  logic [`REG_SIZE] m_store_data;
+  always_comb begin
+    if (memory_state.is_store &&
+        writeback_state.rf_we && writeback_state.rd != 5'd0 &&
+        writeback_state.rd == m_store_rs2)
+      m_store_data = writeback_state.rd_data;
+    else
+      m_store_data = memory_state.store_data;
+  end
 
   always_comb begin
     // defaults
@@ -730,26 +951,26 @@ module DatapathPipelined (
         3'b000: begin // sb — write one byte at byte offset
           case (memory_state.mem_addr[1:0])
             2'b00: begin store_we_to_dmem = 4'b0001;
-                        store_data_to_dmem = {24'd0, memory_state.store_data[7:0]}; end
+                        store_data_to_dmem = {24'd0, m_store_data[7:0]}; end
             2'b01: begin store_we_to_dmem = 4'b0010;
-                        store_data_to_dmem = {16'd0, memory_state.store_data[7:0], 8'd0}; end
+                        store_data_to_dmem = {16'd0, m_store_data[7:0], 8'd0}; end
             2'b10: begin store_we_to_dmem = 4'b0100;
-                        store_data_to_dmem = {8'd0, memory_state.store_data[7:0], 16'd0}; end
+                        store_data_to_dmem = {8'd0, m_store_data[7:0], 16'd0}; end
             2'b11: begin store_we_to_dmem = 4'b1000;
-                        store_data_to_dmem = {memory_state.store_data[7:0], 24'd0}; end
+                        store_data_to_dmem = {m_store_data[7:0], 24'd0}; end
           endcase
         end
         3'b001: begin // sh — write two bytes at halfword offset
           case (memory_state.mem_addr[1])
             1'b0: begin store_we_to_dmem = 4'b0011;
-                        store_data_to_dmem = {16'd0, memory_state.store_data[15:0]}; end
+                        store_data_to_dmem = {16'd0, m_store_data[15:0]}; end
             1'b1: begin store_we_to_dmem = 4'b1100;
-                        store_data_to_dmem = {memory_state.store_data[15:0], 16'd0}; end
+                        store_data_to_dmem = {m_store_data[15:0], 16'd0}; end
           endcase
         end
         3'b010: begin // sw
           store_we_to_dmem   = 4'b1111;
-          store_data_to_dmem = memory_state.store_data;
+          store_data_to_dmem = m_store_data;
         end
         default: begin
           store_we_to_dmem   = 4'b0000;
