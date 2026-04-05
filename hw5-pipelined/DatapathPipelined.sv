@@ -96,7 +96,7 @@ typedef struct packed {
   cycle_status_e cycle_status;
 } stage_decode_t;
 
-/** state before X */
+// state before X
 typedef struct packed {
   logic [`REG_SIZE]  pc;
   logic [`INSN_SIZE] insn;
@@ -118,7 +118,7 @@ typedef struct packed {
   logic              rf_we;
 } stage_execute_t;
  
- /** state before M */
+ // state before M
 typedef struct packed {
   logic [`REG_SIZE]  pc;
   logic [`INSN_SIZE] insn;
@@ -135,7 +135,7 @@ typedef struct packed {
   logic [`REG_SIZE]  store_data;
 } stage_memory_t;
 
- /** state before W */
+ // state before W
 typedef struct packed {
   logic [`REG_SIZE]  pc;
   logic [`INSN_SIZE] insn;
@@ -146,7 +146,7 @@ typedef struct packed {
   logic              halt;
 } stage_writeback_t;
 
-/** div state */
+// div state
 typedef struct packed {
   logic              valid;
   logic [`REG_SIZE]  pc;
