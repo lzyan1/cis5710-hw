@@ -89,14 +89,14 @@ module RegFile (
   end
 endmodule
 
-/** state at the start of Decode stage */
+/** state before D */
 typedef struct packed {
   logic [`REG_SIZE] pc;
   logic [`INSN_SIZE] insn;
   cycle_status_e cycle_status;
 } stage_decode_t;
 
-/** state at the start of X stage */
+/** state before X */
 typedef struct packed {
   logic [`REG_SIZE]  pc;
   logic [`INSN_SIZE] insn;
@@ -118,7 +118,7 @@ typedef struct packed {
   logic              rf_we;
 } stage_execute_t;
  
- /** state at the start of M stage */
+ /** state before M */
 typedef struct packed {
   logic [`REG_SIZE]  pc;
   logic [`INSN_SIZE] insn;
@@ -135,7 +135,7 @@ typedef struct packed {
   logic [`REG_SIZE]  store_data;
 } stage_memory_t;
 
- /** state at the start of W stage */
+ /** state before W */
 typedef struct packed {
   logic [`REG_SIZE]  pc;
   logic [`INSN_SIZE] insn;
@@ -143,9 +143,10 @@ typedef struct packed {
   logic [4:0]        rd;
   logic [`REG_SIZE]  rd_data;
   logic              rf_we;
+  logic              halt;
 } stage_writeback_t;
 
-/** one stage of the parallel div pipeline (Q0..Q7) */
+/** div state */
 typedef struct packed {
   logic              valid;
   logic [`REG_SIZE]  pc;
@@ -153,10 +154,10 @@ typedef struct packed {
   cycle_status_e     cycle_status;
   logic [4:0]        rd;
   logic [2:0]        funct3;
-  logic              rs1_neg;        // sign bit of original rs1
-  logic              rs2_neg;        // sign bit of original rs2
-  logic [`REG_SIZE]  rs1_val;        // original rs1 (div-by-zero / rem)
-  logic [`REG_SIZE]  rs2_val;        // original rs2 (div-by-zero detection)
+  logic              rs1_neg; 
+  logic              rs2_neg;
+  logic [`REG_SIZE]  rs1_val;
+  logic [`REG_SIZE]  rs2_val; 
 } stage_divq_t;
 
 module DatapathPipelined (
@@ -210,10 +211,10 @@ module DatapathPipelined (
       f_cycle_status <= CYCLE_NO_STALL;
     end else begin
       f_cycle_status <= CYCLE_NO_STALL;
-      if (d_load_use_stall || d_div_stall || div_structural_stall)
-        f_pc_current <= f_pc_current;        // hold — re-fetch same insn next cycle
-      else if (x_branch_taken)
-        f_pc_current <= x_branch_target;
+      if (x_branch_taken)
+          f_pc_current <= x_branch_target;
+      else if (d_load_use_stall || d_div_stall)
+          f_pc_current <= f_pc_current;
       else
         f_pc_current <= f_pc_current + 32'd4;
     end
@@ -241,8 +242,8 @@ module DatapathPipelined (
       decode_state <= '{pc: 0, insn: 0, cycle_status: CYCLE_RESET};
     end else if (flush_fd) begin
       decode_state <= '{pc: 0, insn: 0, cycle_status: CYCLE_TAKEN_BRANCH};
-    end else if (d_load_use_stall || d_div_stall || div_structural_stall) begin
-      decode_state <= decode_state;          // hold
+    end else if (d_load_use_stall || d_div_stall) begin
+      decode_state <= decode_state; 
     end else begin
       decode_state <= '{
         pc:           f_pc_current,
@@ -258,7 +259,6 @@ module DatapathPipelined (
       .disasm(d_disasm)
   );
  
-  // ---- decode insn ----
   wire [`OPCODE_SIZE] d_opcode   = decode_state.insn[6:0];
   wire [4:0]          d_rd       = decode_state.insn[11:7];
   wire [2:0]          d_funct3   = decode_state.insn[14:12];
@@ -266,7 +266,6 @@ module DatapathPipelined (
   wire [4:0]          d_rs2      = decode_state.insn[24:20];
   wire [6:0]          d_funct7   = decode_state.insn[31:25];
  
-  // immediates
   wire [11:0] d_imm_i = decode_state.insn[31:20];
   wire [11:0] d_imm_s;
   assign d_imm_s[11:5] = d_funct7;
@@ -288,7 +287,7 @@ module DatapathPipelined (
 
   wire [`REG_SIZE] d_imm_s_sext = {{20{d_imm_s[11]}}, d_imm_s};
 
-  // load-use hazard: load in Execute, dependent insn in Decode
+  // load-use hazard
   wire x_is_load_in_exec = (execute_state.insn[6:0] == OpcodeLoad);
   logic d_uses_rs1, d_uses_rs2;
 
@@ -318,15 +317,13 @@ module DatapathPipelined (
   end
 
   wire d_load_use_stall =
-      x_is_load_in_exec &&
-      (execute_state.rd != 5'd0) &&
-      ((d_uses_rs1 && execute_state.rd == d_rs1) ||
-      (d_uses_rs2 && execute_state.rd == d_rs2));
+    !x_branch_taken &&
+    x_is_load_in_exec &&
+    (execute_state.rd != 5'd0) &&
+    ((d_uses_rs1 && execute_state.rd == d_rs1) ||
+    (d_uses_rs2 && execute_state.rd == d_rs2 && d_opcode != OpcodeStore));
   
-  // RegFile read (WD bypass inside RegFile)
   logic [`REG_SIZE] d_rs1_data, d_rs2_data;
- 
-  // RegFile wires from writeback
   logic        w_rf_we;
   logic [4:0]  w_rd;
   logic [`REG_SIZE] w_rd_data;
@@ -343,7 +340,6 @@ module DatapathPipelined (
       .rs2_data(d_rs2_data)
   );
  
-  // rf_we
   logic d_rf_we;
   always_comb begin
     case (d_opcode)
@@ -359,7 +355,6 @@ module DatapathPipelined (
  
   stage_execute_t execute_state;
  
-  // flush the D/X register when branch taken
   wire flush_dx = x_branch_taken;
  
   always_ff @(posedge clk) begin
@@ -379,8 +374,6 @@ module DatapathPipelined (
         imm_i_sext: 0, imm_b_sext: 0, imm_j_sext: 0, imm_s_sext: 0, imm_u: 0,
         rf_we: 0
       };
-    end else if (div_structural_stall) begin
-      execute_state <= execute_state;  // hold real insn while div takes M slot
     end else if (d_div_stall) begin
       execute_state <= '{
         pc: 0, insn: 0, cycle_status: CYCLE_DIV,
@@ -390,7 +383,6 @@ module DatapathPipelined (
         rf_we: 0
       };
     end else if (d_load_use_stall) begin
-      // NOP bubble; the real insn stays in Decode one more cycle
       execute_state <= '{
         pc: 0, insn: 0, cycle_status: CYCLE_LOAD2USE,
         rs1: 0, rs2: 0, rd: 0,
@@ -411,7 +403,7 @@ module DatapathPipelined (
         imm_i_sext: d_imm_i_sext,
         imm_b_sext: d_imm_b_sext,
         imm_j_sext: d_imm_j_sext,
-        imm_s_sext: d_imm_s_sext,   // ← NEW
+        imm_s_sext: d_imm_s_sext,
         imm_u:      d_imm_u,
         rf_we:      d_rf_we
       };
@@ -433,18 +425,11 @@ module DatapathPipelined (
   wire [6:0]          x_funct7 = execute_state.insn[31:25];
   wire [4:0]          x_imm_shamt = execute_state.insn[24:20];
  
-  // X/M and M/W pipeline register values for bypass
   stage_memory_t    memory_state;
   stage_writeback_t writeback_state;
- 
-  // MX bypass: memory_state.rd_data
-  // WX bypass: writeback_state.rd_data
   logic [`REG_SIZE] x_rs1, x_rs2;
-
-  // forward-declared here so MX bypass and Execute comb can both see it
   logic [`REG_SIZE] m_rd_data;
 
-  // new Execute-stage outputs for load/store
   logic              x_is_load, x_is_store;
   logic [2:0]        x_mem_funct3;
   logic [`REG_SIZE]  x_mem_addr, x_store_data;
@@ -452,7 +437,7 @@ module DatapathPipelined (
   always_comb begin
     if (memory_state.rf_we && memory_state.rd != 5'd0 &&
         memory_state.rd == execute_state.rs1)
-      x_rs1 = m_rd_data;                      // ← was memory_state.rd_data
+      x_rs1 = m_rd_data;
     else if (writeback_state.rf_we && writeback_state.rd != 5'd0 &&
             writeback_state.rd == execute_state.rs1)
       x_rs1 = writeback_state.rd_data;
@@ -461,7 +446,7 @@ module DatapathPipelined (
 
     if (memory_state.rf_we && memory_state.rd != 5'd0 &&
         memory_state.rd == execute_state.rs2)
-      x_rs2 = m_rd_data;                      // ← was memory_state.rd_data
+      x_rs2 = m_rd_data;
     else if (writeback_state.rf_we && writeback_state.rd != 5'd0 &&
             writeback_state.rd == execute_state.rs2)
       x_rs2 = writeback_state.rd_data;
@@ -469,7 +454,6 @@ module DatapathPipelined (
       x_rs2 = execute_state.rs2_data;
   end
  
-  // CLA adder
   logic [`REG_SIZE] x_alu_a, x_alu_b;
   logic             x_alu_cin;
   wire  [`REG_SIZE] x_alu_sum;
@@ -481,17 +465,11 @@ module DatapathPipelined (
       .sum(x_alu_sum)
   );
 
-  // ── Parallel divide pipeline ────────────────────────────────────────────────
-  // Divider inputs are driven combinationally from x_rs1/x_rs2 so stage_block[0]
-  // captures the correct operands at the dispatch posedge.  There is no
-  // combinational loop because div_result (which reads x_div_quotient) lives in
-  // a separate always_comb that never writes back to div_op_a/b.
   logic [`REG_SIZE] div_op_a, div_op_b;
   wire  [`REG_SIZE] x_div_quotient, x_div_remainder;
 
   always_comb begin
     if (x_funct3 == 3'b100 || x_funct3 == 3'b110) begin
-      // signed div / rem: feed absolute values
       div_op_a = x_rs1[31] ? (~x_rs1 + 32'd1) : x_rs1;
       div_op_b = x_rs2[31] ? (~x_rs2 + 32'd1) : x_rs2;
     end else begin
@@ -510,12 +488,10 @@ module DatapathPipelined (
       .o_remainder(x_div_remainder)
   );
 
-  // Detect a div/divu/rem/remu in the Execute stage.
   wire x_is_div_op = (x_opcode == OpcodeRegReg) && (x_funct7 == 7'd1) &&
                      (x_funct3 == 3'b100 || x_funct3 == 3'b101 ||
                       x_funct3 == 3'b110 || x_funct3 == 3'b111);
 
-  // ── Q0..Q7: metadata pipeline running in parallel with the divider ──────────
   stage_divq_t div_q[7];
 
   always_ff @(posedge clk) begin
@@ -542,17 +518,14 @@ module DatapathPipelined (
     end
   end
 
-  // Whether the insn currently in Decode is itself a div/divu/rem/remu.
   wire d_is_div_op = (d_opcode == OpcodeRegReg) && (d_funct7 == 7'd1) &&
                      (d_funct3 == 3'b100 || d_funct3 == 3'b101 ||
                       d_funct3 == 3'b110 || d_funct3 == 3'b111);
 
-  // Any div in-flight (dispatching now or in Q0..Q5; Q6 fires this cycle into M).
   wire div_inflight = x_is_div_op    ||
                       div_q[0].valid || div_q[1].valid || div_q[2].valid ||
                       div_q[3].valid || div_q[4].valid || div_q[5].valid;
 
-  // Dependency check: does the insn in Decode read a register any in-flight div writes?
   wire d_div_dependent =
     (x_is_div_op    && execute_state.rd != 5'd0
                     && (execute_state.rd == d_rs1 || execute_state.rd == d_rs2)) ||
@@ -569,20 +542,11 @@ module DatapathPipelined (
     (div_q[5].valid && div_q[5].rd != 5'd0
                     && (div_q[5].rd == d_rs1 || div_q[5].rd == d_rs2));
 
-  // Stall rules:
-  //   - Non-div insn in Decode: stall if ANY div is in-flight.
-  //   - Div insn in Decode:     stall only if it has a register dependency on an
-  //                             in-flight div (independent back-to-back divs are allowed).
-  wire d_div_stall = div_inflight && (d_is_div_op ? d_div_dependent : 1'b1);
+  wire d_div_stall =
+      !x_branch_taken &&
+      div_inflight &&
+      (d_is_div_op ? d_div_dependent : 1'b1);
 
-  // Structural hazard: div_q[6] needs M but execute_state has a real insn.
-  // Hold X (and F/D) for one cycle and let the div inject into M first.
-  wire div_structural_stall = div_q[6].valid && (execute_state.insn != 32'd0);
-
-  // ── Result computation (used when div_q[6].valid) ───────────────────────────
-  // div_q[6] becomes valid exactly when o_quotient/o_remainder are correct:
-  // stage[7] was updated at posedge D+6 and o_quotient is combinational from it.
-  // memory_state's always_ff reads o_quotient before posedge D+7 overwrites stage[7].
   logic [`REG_SIZE] div_result;
   always_comb begin
     logic div_by_zero, signed_overflow;
@@ -614,7 +578,6 @@ module DatapathPipelined (
     end
   end
 
-  // ALU result and control
   logic [`REG_SIZE] x_rd_data;
   logic             x_rf_we;
   logic             x_halt;
@@ -811,7 +774,6 @@ module DatapathPipelined (
         x_mem_funct3 = x_funct3;
         x_is_load    = 1'b1;
         x_rf_we      = 1'b1;
-        // rd_data set in Memory from dmem
       end
 
       // ---- STORE ----
@@ -844,8 +806,6 @@ module DatapathPipelined (
         is_load: 0, is_store: 0, mem_funct3: 0, mem_addr: 0, store_data: 0
       };
     end else if (div_q[6].valid) begin
-      // Q pipeline complete: inject div result into M stage.
-      // This takes priority over a simultaneous dispatch so the result is never lost.
       memory_state <= '{
         pc:           div_q[6].pc,
         insn:         div_q[6].insn,
@@ -857,7 +817,6 @@ module DatapathPipelined (
         is_load: 0, is_store: 0, mem_funct3: 0, mem_addr: 0, store_data: 0
       };
     end else if (x_is_div_op) begin
-      // Dispatch cycle: div goes to Q path — insert bubble in main pipeline
       memory_state <= '{
         pc: 0, insn: 0, cycle_status: CYCLE_DIV,
         rd: 0, rd_data: 0, rf_we: 0, halt: 0,
@@ -889,17 +848,12 @@ module DatapathPipelined (
  
   // =====================================================
   // MEMORY STAGE
-  // (M1: no loads/stores, just pass through)
   // =====================================================
  
-  // ─── Memory stage: load/store + compute m_rd_data ──────────────────────────
   logic [7:0]  m_load_byte;
   logic [15:0] m_load_half;
 
-  assign halt = memory_state.halt;
-
-  // WM bypass: when a store is in M and W is writing the store's rs2 register,
-  // forward W's result rather than the (potentially stale) latched store_data.
+  // WM bypass
   wire [4:0]        m_store_rs2 = memory_state.insn[24:20]; // rs2 for S-type
   logic [`REG_SIZE] m_store_data;
   always_comb begin
@@ -912,7 +866,6 @@ module DatapathPipelined (
   end
 
   always_comb begin
-    // defaults
     m_rd_data          = memory_state.rd_data;
     addr_to_dmem       = 32'd0;
     store_data_to_dmem = 32'd0;
@@ -923,7 +876,6 @@ module DatapathPipelined (
     if (memory_state.is_load) begin
       addr_to_dmem = {memory_state.mem_addr[31:2], 2'b00};
 
-      // select byte / halfword based on byte offset
       case (memory_state.mem_addr[1:0])
         2'b00: m_load_byte = load_data_from_dmem[ 7: 0];
         2'b01: m_load_byte = load_data_from_dmem[15: 8];
@@ -948,7 +900,7 @@ module DatapathPipelined (
       addr_to_dmem = {memory_state.mem_addr[31:2], 2'b00};
 
       case (memory_state.mem_funct3)
-        3'b000: begin // sb — write one byte at byte offset
+        3'b000: begin // sb
           case (memory_state.mem_addr[1:0])
             2'b00: begin store_we_to_dmem = 4'b0001;
                         store_data_to_dmem = {24'd0, m_store_data[7:0]}; end
@@ -960,7 +912,7 @@ module DatapathPipelined (
                         store_data_to_dmem = {m_store_data[7:0], 24'd0}; end
           endcase
         end
-        3'b001: begin // sh — write two bytes at halfword offset
+        3'b001: begin // sh
           case (memory_state.mem_addr[1])
             1'b0: begin store_we_to_dmem = 4'b0011;
                         store_data_to_dmem = {16'd0, m_store_data[15:0]}; end
@@ -988,7 +940,7 @@ module DatapathPipelined (
     if (rst) begin
       writeback_state <= '{
         pc: 0, insn: 0, cycle_status: CYCLE_RESET,
-        rd: 0, rd_data: 0, rf_we: 0
+        rd: 0, rd_data: 0, rf_we: 0, halt: 0
       };
     end else begin
       writeback_state <= '{
@@ -997,7 +949,8 @@ module DatapathPipelined (
         cycle_status: memory_state.cycle_status,
         rd:           memory_state.rd,
         rd_data:      m_rd_data, 
-        rf_we:        memory_state.rf_we
+        rf_we:        memory_state.rf_we,
+        halt:         memory_state.halt
       };
     end
   end
@@ -1015,11 +968,11 @@ module DatapathPipelined (
   assign w_rf_we   = writeback_state.rf_we;
   assign w_rd      = writeback_state.rd;
   assign w_rd_data = writeback_state.rd_data;
+  assign halt      = writeback_state.halt;
  
   assign trace_completed_pc           = writeback_state.pc;
   assign trace_completed_insn         = writeback_state.insn;
   assign trace_completed_cycle_status = writeback_state.cycle_status;
- 
  
 endmodule
 
