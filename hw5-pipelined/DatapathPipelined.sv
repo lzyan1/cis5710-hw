@@ -89,7 +89,7 @@ module RegFile (
   end
 endmodule
 
-/** state before D */
+// state before D
 typedef struct packed {
   logic [`REG_SIZE] pc;
   logic [`INSN_SIZE] insn;
