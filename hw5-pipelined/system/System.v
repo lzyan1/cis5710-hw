@@ -7,7 +7,7 @@ module MyClockGen (
 	output wire clk_proc;
 	output wire locked;
 	wire clkfb;
-	(* FREQUENCY_PIN_CLKI = "25" *) (* FREQUENCY_PIN_CLKOP = "5" *) (* ICP_CURRENT = "12" *) (* LPF_RESISTOR = "8" *) (* MFG_ENABLE_FILTEROPAMP = "1" *) (* MFG_GMCREF_SEL = "2" *) EHXPLLL #(
+	(* FREQUENCY_PIN_CLKI = "25" *) (* FREQUENCY_PIN_CLKOP = "10" *) (* ICP_CURRENT = "12" *) (* LPF_RESISTOR = "8" *) (* MFG_ENABLE_FILTEROPAMP = "1" *) (* MFG_GMCREF_SEL = "2" *) EHXPLLL #(
 		.PLLRST_ENA("DISABLED"),
 		.INTFB_WAKE("DISABLED"),
 		.STDBY_ENABLE("DISABLED"),
@@ -18,11 +18,11 @@ module MyClockGen (
 		.OUTDIVIDER_MUXD("DIVD"),
 		.CLKI_DIV(5),
 		.CLKOP_ENABLE("ENABLED"),
-		.CLKOP_DIV(120),
-		.CLKOP_CPHASE(60),
+		.CLKOP_DIV(60),
+		.CLKOP_CPHASE(30),
 		.CLKOP_FPHASE(0),
 		.FEEDBK_PATH("INT_OP"),
-		.CLKFB_DIV(1)
+		.CLKFB_DIV(2)
 	) pll_i(
 		.RST(1'b0),
 		.STDBY(1'b0),
@@ -996,14 +996,21 @@ module MemorySingleCycle (
 		end
 	initial _sv2v_0 = 0;
 endmodule
-module SystemResourceCheck (
+module SystemDemo (
 	external_clk_25MHz,
 	btn,
-	led
+	led,
+	gp
 );
 	input wire external_clk_25MHz;
 	input wire [6:0] btn;
 	output wire [7:0] led;
+	output wire [27:0] gp;
+	localparam signed [31:0] MmapGpioStart = 32'hff001000;
+	localparam signed [31:0] LastGpioIndex = 27;
+	localparam signed [31:0] MmapGpioEnd = MmapGpioStart + LastGpioIndex;
+	localparam signed [31:0] MmapLeds = 32'hff002000;
+	localparam signed [31:0] MmapButtons = 32'hff003000;
 	wire clk_proc;
 	wire clk_locked;
 	MyClockGen clock_gen(
@@ -1020,7 +1027,23 @@ module SystemResourceCheck (
 	wire [31:0] trace_writeback_pc;
 	wire [31:0] trace_writeback_insn;
 	wire [31:0] trace_writeback_cycle_status;
-	MemorySingleCycle #(.NUM_WORDS(128)) memory(
+	wire is_gpio_write = (mem_data_we != 0) && ((MmapGpioStart <= mem_data_addr) && (mem_data_addr <= MmapGpioEnd));
+	wire is_led_write = (mem_data_we != 0) && (mem_data_addr == MmapLeds);
+	wire is_button_read = mem_data_addr == MmapButtons;
+	reg [7:0] led_reg;
+	reg [27:0] gpio_reg;
+	always @(posedge clk_proc)
+		if (!clk_locked) begin
+			led_reg <= 0;
+			gpio_reg <= 0;
+		end
+		else if (is_gpio_write)
+			gpio_reg[mem_data_addr - MmapGpioStart] <= mem_data_to_write[0];
+		else if (is_led_write)
+			led_reg <= mem_data_to_write[7:0];
+	assign gp = gpio_reg;
+	assign led = led_reg;
+	MemorySingleCycle #(.NUM_WORDS(1024)) memory(
 		.rst(!clk_locked),
 		.clk(clk_proc),
 		.pc_to_imem(pc_to_imem),
@@ -1028,7 +1051,7 @@ module SystemResourceCheck (
 		.addr_to_dmem(mem_data_addr),
 		.load_data_from_dmem(mem_data_loaded_value),
 		.store_data_to_dmem(mem_data_to_write),
-		.store_we_to_dmem(mem_data_we)
+		.store_we_to_dmem((is_gpio_write ? 4'd0 : mem_data_we))
 	);
 	DatapathPipelined datapath(
 		.clk(clk_proc),
@@ -1039,7 +1062,7 @@ module SystemResourceCheck (
 		.store_data_to_dmem(mem_data_to_write),
 		.store_we_to_dmem(mem_data_we),
 		.load_data_from_dmem(mem_data_loaded_value),
-		.halt(led[0]),
+		.halt(),
 		.trace_completed_pc(trace_writeback_pc),
 		.trace_completed_insn(trace_writeback_insn),
 		.trace_completed_cycle_status(trace_writeback_cycle_status)
