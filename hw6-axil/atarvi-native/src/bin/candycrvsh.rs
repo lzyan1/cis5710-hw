@@ -64,8 +64,8 @@ struct LedOutput {
 }
 
 // TOOD: reset doesn't work if we use 0xFFFF_FFFC...
-const STACK_START: u32 = 0xFFFF_FFFC;
-// const STACK_START: u32 = 0xFFFF_FEFC;
+// const STACK_START: u32 = 0xFFFF_FFFC;
+const STACK_START: u32 = 0xFFFF_FEFC;
 // const STACK_START: u32 = 0x7EFC;
 
 #[link_section = ".start"]
@@ -156,8 +156,8 @@ impl Tile {
     }
 }
 
-const SCREEN_WIDTH: usize = 320;
-const SCREEN_HEIGHT: usize = 240;
+const SCREEN_WIDTH: usize = 400;
+const SCREEN_HEIGHT: usize = 300;
 const TILE_SIZE: usize = 32; // Each tile is 32x32 pixels
 const GRID_WIDTH: usize = 6;
 const GRID_HEIGHT: usize = 7;
@@ -181,7 +181,7 @@ type MatchGrid = [[bool; GRID_WIDTH]; GRID_HEIGHT];
 
 #[no_mangle]
 pub fn main() -> ! {
-    stack_check();
+    // stack_check();
 
     // frame buffer
     let mut screen: &mut FrameBuffer = unsafe { &mut *(MMAP_HDMI as *mut FrameBuffer) };
@@ -219,10 +219,12 @@ pub fn main() -> ! {
             grid[y][x] = Tile::random(above, left);
         }
     }
+    let mut first_run: bool = true;
 
     let mut gamepad_prior = UsbGamepadInput::from(0);
     loop {
         let mut gamepad = UsbGamepadInput::from(0);
+        let mut button_pressed: bool = false;
 
         // check for gamepad button presses
         let gamepad_now = UsbGamepadInput::from(unsafe {read_volatile(MMAP_USB)});
@@ -231,51 +233,62 @@ pub fn main() -> ! {
         } else if gamepad_prior.up() && !gamepad_now.up() {
             gamepad_prior.set_up(false);
             gamepad.set_up(true); // record button press event
+            button_pressed = true;
         }
         if !gamepad_prior.down() && gamepad_now.down() {
             gamepad_prior.set_down(true);
         } else if gamepad_prior.down() && !gamepad_now.down() {
             gamepad_prior.set_down(false);
             gamepad.set_down(true); // record button press event
+            button_pressed = true;
         }
         if !gamepad_prior.left() && gamepad_now.left() {
             gamepad_prior.set_left(true);
         } else if gamepad_prior.left() && !gamepad_now.left() {
             gamepad_prior.set_left(false);
             gamepad.set_left(true); // record button press event
+            button_pressed = true;
         }
         if !gamepad_prior.right() && gamepad_now.right() {
             gamepad_prior.set_right(true);
         } else if gamepad_prior.right() && !gamepad_now.right() {
             gamepad_prior.set_right(false);
             gamepad.set_right(true); // record button press event
+            button_pressed = true;
         }
         if !gamepad_prior.x() && gamepad_now.x() {
             gamepad_prior.set_x(true);
         } else if gamepad_prior.x() && !gamepad_now.x() {
             gamepad_prior.set_x(false);
             gamepad.set_x(true); // record button press event
+            button_pressed = true;
         }
         if !gamepad_prior.y() && gamepad_now.y() {
             gamepad_prior.set_y(true);
         } else if gamepad_prior.y() && !gamepad_now.y() {
             gamepad_prior.set_y(false);
             gamepad.set_y(true); // record button press event
+            button_pressed = true;
         }
         if !gamepad_prior.a() && gamepad_now.a() {
             gamepad_prior.set_a(true);
         } else if gamepad_prior.a() && !gamepad_now.a() {
             gamepad_prior.set_a(false);
             gamepad.set_a(true); // record button press event
+            button_pressed = true;
         }
         if !gamepad_prior.b() && gamepad_now.b() {
             gamepad_prior.set_b(true);
         } else if gamepad_prior.b() && !gamepad_now.b() {
             gamepad_prior.set_b(false);
             gamepad.set_b(true); // record button press event
+            button_pressed = true;
         }
-
-        unsafe { write_volatile(MMAP_LEDS, 5); }
+        if !button_pressed && !first_run {
+            wait_for_millis(30);
+            continue;
+        }
+        first_run = false;
 
         // move cursor
         if gamepad.left() && selected_x > 0 {
@@ -340,8 +353,6 @@ pub fn main() -> ! {
                 grid[selected_y][selected_x+1] = orig_dst;
             }
         }
-
-        unsafe { write_volatile(MMAP_LEDS, 6); }
 
         while check_matches(&grid, Some(&mut matches)) {
             let mut match_xmin: usize = GRID_WIDTH * 2;
@@ -440,11 +451,14 @@ pub fn main() -> ! {
                     &mut screen,
                     (X_MARGIN, Y_MARGIN));
 
-        // render the score
+        // render the score to screen and LEDs
         erase_text(8, WHITE, &mut screen, SCORE_VALUE_LOCATION);
         let mut buffer = itoa::Buffer::new();
         let score_str = buffer.format(score);
         render_text(score_str, BLACK, &mut screen, SCORE_VALUE_LOCATION);
+        unsafe {
+            write_volatile(MMAP_LEDS, score as u8);
+        }
 
     } // end main loop
 }
@@ -561,7 +575,7 @@ fn render_text(s: &str, color: u8, screen: &mut FrameBuffer, render_start: (usiz
 /// Erase one line of text by writing `num_chars` 8x8 blocks of `color` pixels, starting at `render_start`
 fn erase_text(num_chars: usize, color: u8, screen: &mut FrameBuffer, render_start: (usize,usize)) {
     for y in render_start.1..(render_start.1+8) {
-        for x in render_start.0..(num_chars*8) {
+        for x in render_start.0..(render_start.0 + (num_chars*8)) {
             write_byte(color, &mut screen[y][x]);
         }
     }
